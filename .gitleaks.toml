@@ -12,8 +12,8 @@ regex = '''[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}'''
 description = "noreply and placeholder addresses"
 regexes = ['''(?i)@(?:users\.noreply\.github\.com|(?:[a-z0-9-]+\.)*example\.(?:com|org|net)|[a-z0-9.-]*\.invalid)$''']
 [[rules.allowlists]]
-description = "public role addresses of a reviewed vendor"
-regexes = ['''(?i)^(?:support|security)@github\.com$''']
+description = "public role addresses of a reviewed vendor (noreply: GitHub's own merge and web-edit commits)"
+regexes = ['''(?i)^(?:support|security|noreply)@github\.com$''']
 
 
 [[rules]]

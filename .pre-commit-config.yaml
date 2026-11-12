@@ -1,0 +1,9 @@
+# The git hook of standard §7C.6: gitleaks at commit time, with this repository's config.
+default_language_version:
+  golang: 1.27.3
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e  # v8.30.1
+    hooks:
+      - id: gitleaks
+        args: [--config=.gitleaks.toml]

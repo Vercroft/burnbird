@@ -1,0 +1,64 @@
+# Patterns for addresses, links and personal data on top of the default gitleaks rules. Go RE2 only.
+title = "leak review, patterns"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "email"
+description = "email address"
+regex = '''[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}'''
+[[rules.allowlists]]
+description = "noreply and placeholder addresses"
+regexes = ['''(?i)@(?:users\.noreply\.github\.com|(?:[a-z0-9-]+\.)*example\.(?:com|org|net)|[a-z0-9.-]*\.invalid)$''']
+[[rules.allowlists]]
+description = "public role addresses of a reviewed vendor"
+regexes = ['''(?i)^(?:support|security)@github\.com$''']
+
+
+[[rules]]
+id = "ipv4"
+description = "IPv4 address"
+regex = '''\b(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\b'''
+[[rules.allowlists]]
+description = "loopback, unspecified and documentation ranges"
+regexes = ['''^(?:127\.|0\.0\.0\.0$|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.)''']
+
+
+[[rules]]
+id = "ipv6"
+description = "IPv6 address"
+regex = '''(?i)\b(?:(?:[0-9a-f]{1,4}:){3,7}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){1,6}:[0-9a-f]{1,4})\b'''
+[[rules.allowlists]]
+description = "documentation range"
+regexes = ['''(?i)^2001:db8:''']
+
+
+[[rules]]
+id = "home-path"
+description = "path in a person's home directory"
+# The match starts with one character before the path: gitleaks' default allowlist drops any
+# secret that is a bare "^/home/..." path, so a match that starts at the slash would never report.
+regex = '''(?i)(?:[^\w/.-](?:/home/[a-z_][a-z0-9_-]*/|/Users/[A-Za-z0-9._-]+/)|[A-Z]:\\Users\\[A-Za-z0-9._-]+\\)'''
+[[rules.allowlists]]
+description = "generic CI and placeholder users"
+regexes = ['''(?is)^.?(?:/home/(?:runner|user|username|you)/|/Users/(?:user|username|you)/)''']
+
+
+[[rules]]
+id = "phone"
+description = "international phone number"
+# Starts with "+" after a non-word character, so a version's build part (1.2.3+2013...) is not one.
+regex = '''(?:^|[^\w.+-])\+[1-9](?:[ .()-]?[0-9]){7,14}\b'''
+
+[[rules]]
+id = "url-host"
+description = "link to a host that is not reviewed as public"
+regex = '''(?i)\bhttps?://([a-z0-9][a-z0-9.-]*)'''
+secretGroup = 1
+[[rules.allowlists]]
+description = "placeholder hosts"
+regexes = ['''(?i)^(?:localhost|(?:[a-z0-9-]+\.)*example(?:\.(?:com|org|net))?|[a-z0-9.-]*\.(?:invalid|test))$''']
+[[rules.allowlists]]
+description = "reviewed public hosts: add one only after reviewing it"
+regexes = ['''(?i)^(?:adr\.github\.io|bford\.info|biomejs\.dev|blessed\.rs|blog\.rust-lang\.org|blog\.sentry\.io|blog\.yossarian\.net|clippy\.rust-lang\.org|coreyja\.com|daniel\.haxx\.se|dev\.classmethod\.jp|devblogs\.microsoft\.com|devguide\.python\.org|diataxis\.fr|discuss\.python\.org|doc\.rust-lang\.org|docs\.astral\.sh|docs\.docker\.com|docs\.expo\.dev|docs\.github\.com|docs\.npmjs\.com|docs\.pytest\.org|docs\.python\.org|docs\.zizmor\.sh|embarkstudios\.github\.io|eslint\.org|fsl\.software|git-scm\.com|github\.blog|github\.com|google\.github\.io|hynek\.me|keepachangelog\.com|labs\.boostsecurity\.io|mypy\.readthedocs\.io|nexte\.st|nextjs\.org|nodejs\.org|oxc\.rs|packages\.debian\.org|packaging\.python\.org|peps\.python\.org|pip\.pypa\.io|pnpm\.io|polyformproject\.org|pydevtools\.com|rust-lang\.github\.io|spdx\.org|sqlite\.org|thai-lint\.readthedocs\.io|tianpan\.co|typescript-eslint\.io|typing\.python\.org|us\.pycon\.org|words\.filippo\.io|www\.cisa\.gov|www\.cognitect\.com|www\.debian\.org|www\.devclass\.com|www\.pkgpulse\.com|www\.postgresql\.org|www\.python\.org|www\.theregister\.com|www\.typescriptlang\.org|www\.writethedocs\.org)$''']

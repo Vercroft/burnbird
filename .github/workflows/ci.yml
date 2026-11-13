@@ -46,6 +46,23 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    # A throwaway Postgres for the storage tests. The image is pinned by digest, here only;
+    # CONTRIBUTING.md reads it from this line for the local container.
+    services:
+      postgres:
+        image: postgres:18.6@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42
+        env:
+          POSTGRES_DB: burnbird_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d burnbird_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      BURNBIRD_TEST_DATABASE_URL: postgresql+psycopg://postgres@localhost:5432/burnbird_test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

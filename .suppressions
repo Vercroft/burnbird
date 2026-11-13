@@ -1,0 +1,1 @@
+scripts/check-image-age.py: # noqa: S603  # path from shutil.which, no shell, fixed arguments

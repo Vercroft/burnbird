@@ -7,7 +7,11 @@ license = "FSL-1.1-MIT"
 license-files = ["LICENSE"]
 # The feature release of .python-version; tests/test_python_version.py keeps them in step.
 requires-python = ">=3.15,<3.16"
-dependencies = []
+dependencies = [
+    "alembic==1.20.1",
+    "psycopg[binary]==3.3.8",
+    "sqlalchemy==2.1.8",
+]
 
 [dependency-groups]
 dev = [
@@ -72,7 +76,7 @@ exclude = [".github/scripts/**"]
 
 [tool.mypy]
 python_version = "3.15"  # the product's Python (rule 4)
-files = ["src", "tests"]
+files = ["src", "tests", "scripts"]
 strict = true
 warn_unreachable = true
 enable_error_code = [
@@ -89,3 +93,8 @@ strict = true
 [tool.uv]
 exclude-newer = "7 days"
 no-build = true
+
+[tool.alembic]
+# The migrations ship inside the package, with the code version they belong to. The database URL
+# comes only from the environment (BURNBIRD_DATABASE_URL), never from a file.
+script_location = "burnbird:migrations"

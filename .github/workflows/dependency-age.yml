@@ -1,7 +1,8 @@
 name: dependency-age
 
-# Fails when a pull request locks a package version younger than 7 days: uv.lock must match
-# pyproject.toml's exclude-newer = "7 days". GitHub Actions pins are covered by Dependabot's cooldown.
+# Fails when a pull request locks a package version younger than 7 days (uv.lock must match
+# pyproject.toml's exclude-newer = "7 days"), or adds a container image built less than 7 days ago
+# (scripts/check-image-age.py). GitHub Actions pins are covered by Dependabot's cooldown.
 on:
   pull_request:
 
@@ -25,3 +26,7 @@ jobs:
           enable-cache: false
       - name: The Python lockfile holds only versions at least 7 days old
         run: uv lock --check
+      - name: Every image the pull request adds is at least 7 days old
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: python3 scripts/check-image-age.py --base "origin/$BASE_REF"

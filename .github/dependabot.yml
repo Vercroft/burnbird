@@ -17,6 +17,26 @@ updates:
         patterns: ["*"]
     open-pull-requests-limit: 3
 
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7 # must match uv exclude-newer = "7 days"
+    groups:
+      uv-minor-and-patch:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      uv-security:
+        applies-to: security-updates
+        patterns: ["*"]
+    # A new Python feature release (3.15 to 3.16) is a planned change, not a monthly update.
+    ignore:
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+    open-pull-requests-limit: 3
+
   # The hash-pinned CI tools (zizmor).
   - package-ecosystem: pip
     directory: /.github/requirements

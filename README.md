@@ -22,6 +22,22 @@ billing or administration access and cannot change anything.
 
 We made the code public so you can check what Burnbird does with your data.
 
+## Development
+
+We use [uv](https://docs.astral.sh/uv/), which installs the Python version that `.python-version` names. Set up and
+run the checks that CI runs:
+
+```sh
+uv sync --locked
+uv run --locked ruff format --check
+uv run --locked ruff check
+uv run --locked mypy
+uv run --locked pytest
+uv lock --check
+```
+
+The full list of commands, with the CI job that runs each, is in [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Contributing and security
 
 We welcome issues and discussions: see [CONTRIBUTING.md](CONTRIBUTING.md). Report a vulnerability privately, as

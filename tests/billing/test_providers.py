@@ -2,7 +2,7 @@ from decimal import Decimal
 
 import pytest
 
-from burnbird.providers import ProviderTableError, load_table, parse_table
+from burnbird.billing.providers import ProviderTableError, load_table, parse_table
 
 
 def _row(provider: str, row_id: str) -> tuple[Decimal | None, Decimal | None]:

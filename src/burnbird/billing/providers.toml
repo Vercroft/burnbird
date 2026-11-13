@@ -1,4 +1,4 @@
-# Which provider runs a job, and what a minute costs. Data only: burnbird/providers.py reads and validates it, and
+# Which provider runs a job, and what a minute costs. Data only: burnbird/billing/providers.py reads and validates it, and
 # nothing in it is ever evaluated. Money and weights are strings, read as Decimal. Every row names the pages its
 # facts come from and the date they were read. Label patterns are matched with fnmatch.fnmatchcase.
 #

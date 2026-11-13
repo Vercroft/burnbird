@@ -89,7 +89,9 @@ class ProviderTable:
 @functools.cache
 def load_table() -> ProviderTable:
     """Read and validate the table shipped in the package."""
-    text = resources.files("burnbird").joinpath("providers.toml").read_text(encoding="utf-8")
+    text = (
+        resources.files("burnbird.billing").joinpath("providers.toml").read_text(encoding="utf-8")
+    )
     return parse_table(text)
 
 

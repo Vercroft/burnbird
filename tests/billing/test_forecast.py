@@ -4,9 +4,9 @@ from decimal import Decimal
 
 import pytest
 
-from burnbird.classify import classify
-from burnbird.counting import Job, bill, per_day
-from burnbird.forecast import AllowanceWarning, Forecast, WarningKind, cycle, forecast
+from burnbird.billing.classify import classify
+from burnbird.billing.counting import Job, bill, per_day
+from burnbird.billing.forecast import AllowanceWarning, Forecast, WarningKind, cycle, forecast
 
 USED_75 = AllowanceWarning(WarningKind.USED_75, None)
 USED_90 = AllowanceWarning(WarningKind.USED_90, None)

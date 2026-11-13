@@ -3,9 +3,9 @@ from decimal import Decimal
 
 import pytest
 
-from burnbird.classify import Classification, classify
-from burnbird.counting import Billed, Job, bill, billed_minutes, per_day
-from burnbird.providers import Rounding
+from burnbird.billing.classify import Classification, classify
+from burnbird.billing.counting import Billed, Job, bill, billed_minutes, per_day
+from burnbird.billing.providers import Rounding
 
 # Invented jobs. Standard GitHub-hosted jobs report this runner group.
 HOSTED = "GitHub Actions"

@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
-from burnbird.classify import Classification
-from burnbird.providers import Rounding, load_table
+from burnbird.billing.classify import Classification
+from burnbird.billing.providers import Rounding, load_table
 
 _MICROSECONDS_PER_MINUTE = 60_000_000
 

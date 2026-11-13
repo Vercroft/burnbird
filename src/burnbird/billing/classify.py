@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from fnmatch import fnmatchcase
 
-from burnbird.providers import (
+from burnbird.billing.providers import (
     BLACKSMITH,
     GITHUB,
     SELF_HOSTED,

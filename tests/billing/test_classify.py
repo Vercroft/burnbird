@@ -4,8 +4,8 @@ from decimal import Decimal
 
 import pytest
 
-from burnbird.classify import UNKNOWN, Classification, classify
-from burnbird.providers import RunnerClass, load_table
+from burnbird.billing.classify import UNKNOWN, Classification, classify
+from burnbird.billing.providers import RunnerClass, load_table
 
 # Invented jobs. Standard GitHub-hosted jobs carry the values the jobs API returns for them.
 HOSTED = "GitHub Actions"

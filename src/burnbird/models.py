@@ -25,7 +25,7 @@ from sqlalchemy import (
     false,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # Stable constraint names, so a later migration can name what it changes.
@@ -122,7 +122,8 @@ class Job(Base):
     repository_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("repository.id", ondelete="CASCADE")
     )
-    workflow_name: Mapped[str]
+    # Nullable in GitHub's workflow job schema.
+    workflow_name: Mapped[str | None]
     labels: Mapped[list[str]] = mapped_column(ARRAY(Text))
     runner_group_name: Mapped[str | None]
     runner_name: Mapped[str | None]
@@ -174,13 +175,23 @@ class UserSession(Base):
 
 
 class WebhookDelivery(Base):
-    """A webhook delivery seen, by GitHub's delivery ID, so a repeat is refused."""
+    """A webhook delivery we handle, by GitHub's delivery ID, so a repeat is refused.
+
+    ``payload`` holds only the fields that ``burnbird.github.schemas`` validates for the event and
+    action, never the received body. A delivery that fails is tried again from ``retry_at`` until
+    ``attempts`` reaches the worker's limit.
+    """
 
     __tablename__ = "webhook_delivery"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     received_at: Mapped[datetime] = mapped_column(index=True)
     processed_at: Mapped[datetime | None]
+    event: Mapped[str]
+    action: Mapped[str]
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    attempts: Mapped[int] = mapped_column(SmallInteger, server_default=text("0"))
+    retry_at: Mapped[datetime | None]
 
 
 class LabelSize(Base):

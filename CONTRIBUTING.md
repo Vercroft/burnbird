@@ -73,11 +73,14 @@ messages, the pull request title or its description. Its output names only the c
 | `src/burnbird/billing/classify.py` | Classifies a job: its provider, runner size and price or weight a minute |
 | `src/burnbird/billing/counting.py` | Bills a job: its minutes after the provider's rounding, its dollars or allowance units, and the day it counts on |
 | `src/burnbird/billing/forecast.py` | An allowance's cycle, use, pace and run-out date, and its warnings as data |
-| `src/burnbird/models.py` | The stored tables |
+| `src/burnbird/github/` | GitHub: `router.py` takes `POST /github/webhook` (signature, then the fields of a handled event, stored once); `schemas.py` names the fields kept per event; `signature.py` checks the HMAC; `events.py` is the worker's step that turns stored deliveries into jobs and installations; `config.py` reads the webhook secret |
+| `src/burnbird/web.py` | Creates the web app: the body limit and each feature's router, nothing else |
+| `src/burnbird/worker.py` | One pass of the worker |
+| `src/burnbird/models.py` | The stored tables, webhook deliveries included (their validated fields only, never the body) |
 | `src/burnbird/database.py` | The database URL from the environment, and an engine whose connections and statements time out |
 | `src/burnbird/migrations/` | The Alembic migrations, shipped inside the package; `[tool.alembic]` in `pyproject.toml` points at them |
-| `src/burnbird/retention.py` | What is deleted and when: jobs after 90 days, deliveries after 7, expired sessions, "Delete my data" and an uninstall |
-| `tests/` | Its tests, in folders that mirror the feature folders (`tests/billing/`), each with an `__init__.py` so mypy accepts the same test file name in two folders; `tests/conftest.py` gives the storage tests a migrated Postgres and rolls each test back |
+| `src/burnbird/retention.py` | What is deleted and when: jobs after 90 days, deliveries after 7, expired sessions, "Delete my data", an uninstall, and repositories removed from an installation |
+| `tests/` | Its tests, in folders that mirror the feature folders (`tests/billing/`, `tests/github/`), each with an `__init__.py` so mypy accepts the same test file name in two folders; `tests/conftest.py` gives the storage tests a migrated Postgres and rolls each test back |
 | `scripts/check-image-age.py`, `tests/test_check_image_age.py` | The image-age check and its test, vendored unchanged; `tests/test_vendored.py` holds their recorded sha256 |
 | `LICENSE` | The licence, FSL-1.1-MIT, unchanged except its copyright line |
 | `SECURITY.md` | How to report a vulnerability |
@@ -104,6 +107,8 @@ One pull request:
 ## Boundaries
 
 - Secrets never go in git.
+- The webhook secret is read only from the file named in `BURNBIRD_WEBHOOK_SECRET_FILE`; tests make a random one.
+- Endpoints are plain `def`; `async def` only for a dependency that awaits the request body and makes no blocking call.
 - Every action in a workflow is pinned by full commit SHA with its release in a comment, and the release is at least 7
   days old.
 - Python packages are pinned exactly in `pyproject.toml` and locked in `uv.lock`; uv refuses versions younger than 7

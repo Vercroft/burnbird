@@ -25,6 +25,7 @@ from burnbird.retention import (
     purge_deliveries,
     purge_jobs,
     purge_sessions,
+    remove_repositories,
     uninstall,
 )
 
@@ -68,6 +69,19 @@ def _job(job_id: int, account: int, created_at: datetime = RECENT) -> Job:
         runner_class="actions_linux",
         billed_minutes=Decimal(2),
         amount=Decimal("0.012"),
+    )
+
+
+def _delivery(
+    delivery_id: uuid.UUID, received_at: datetime, processed_at: datetime | None = None
+) -> WebhookDelivery:
+    return WebhookDelivery(
+        id=delivery_id,
+        received_at=received_at,
+        processed_at=processed_at,
+        event="installation",
+        action="suspend",
+        payload={"installation": {"id": INSTALLATION[ORG]}},
     )
 
 
@@ -121,7 +135,7 @@ def world(session: Session) -> Session:
             _session(PERSON, NOW + timedelta(hours=1), 1),
             _session(PERSON, NOW + timedelta(hours=2), 2),
             _session(MEMBER, NOW + timedelta(hours=3), 3),
-            WebhookDelivery(id=uuid.UUID(int=1), received_at=RECENT, processed_at=RECENT),
+            _delivery(uuid.UUID(int=1), RECENT, RECENT),
         ]
     )
     session.flush()
@@ -151,9 +165,9 @@ def test_deliveries_are_kept_exactly_7_days(world: Session) -> None:
     kept, gone = uuid.UUID(int=10), uuid.UUID(int=11)
     world.add_all(
         [
-            WebhookDelivery(id=kept, received_at=NOW - timedelta(days=7)),
+            _delivery(kept, NOW - timedelta(days=7)),
             # Never processed: it goes all the same.
-            WebhookDelivery(id=gone, received_at=NOW - timedelta(days=7) - TICK),
+            _delivery(gone, NOW - timedelta(days=7) - TICK),
         ]
     )
     before = _rows(world)
@@ -230,4 +244,22 @@ def test_uninstall_removes_the_account_and_everything_under_it(world: Session) -
 def test_uninstalling_an_unknown_installation_deletes_nothing(world: Session) -> None:
     before = _rows(world)
     assert uninstall(world, 9999) == Deleted()
+    assert _rows(world) == before
+
+
+# ---------- repositories removed from an installation ----------
+
+
+def test_removing_repositories_deletes_them_and_their_jobs(world: Session) -> None:
+    before = _rows(world)
+    deleted = remove_repositories(world, INSTALLATION[ORG], [REPOSITORY[ORG]])
+    assert deleted == Deleted(jobs=1, repositories=1)
+    assert _deleted(before, _rows(world)) == {"repository": {(REPOSITORY[ORG],)}, "job": {(3, 1)}}
+
+
+def test_removing_another_installations_repository_deletes_nothing(world: Session) -> None:
+    before = _rows(world)
+    assert (
+        remove_repositories(world, INSTALLATION[ORG], [REPOSITORY[OTHER_ORG], 9999]) == Deleted()
+    )
     assert _rows(world) == before

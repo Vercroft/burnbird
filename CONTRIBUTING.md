@@ -59,6 +59,8 @@ messages, the pull request title or its description. Its output names only the c
 | `src/burnbird/providers.toml` | The provider table: each runner size's label patterns and its price or weight a minute, with the pages each fact comes from and the date they were read |
 | `src/burnbird/providers.py` | Loads the provider table and refuses an invalid one, naming the row |
 | `src/burnbird/classify.py` | Classifies a job: its provider, runner size and price or weight a minute |
+| `src/burnbird/counting.py` | Bills a job: its minutes after the provider's rounding, its dollars or allowance units, and the day it counts on |
+| `src/burnbird/forecast.py` | An allowance's cycle, use, pace and run-out date, and its warnings as data |
 | `tests/` | Its tests |
 | `LICENSE` | The licence, FSL-1.1-MIT, unchanged except its copyright line |
 | `SECURITY.md` | How to report a vulnerability |

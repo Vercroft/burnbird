@@ -45,7 +45,7 @@ row is what CI runs, in the job named in the last column.
 
 The commit policy allows only approved people as author, committer and co-author (the organisation variable
 `ALLOWED_COMMIT_IDENTITIES`), only the trailer keys listed at the top of `.github/scripts/commit_policy.py`, only
-links to the reviewed hosts in `.gitleaks.toml` (the `url-host` rule's lists), and no em or en dash in commit
+links to the hosts in the `url-host` rule's placeholder and reviewed public lists in `.gitleaks.toml`, and no em or en dash in commit
 messages, the pull request title or its description. Its output names only the commit and the rule, never the text.
 
 ## Map
@@ -56,16 +56,31 @@ messages, the pull request title or its description. Its output names only the c
 | `pyproject.toml`, `uv.lock` | The Python project, its dev tools (exact pins) and the lint, type and test settings |
 | `.python-version` | The one Python version; `tests/test_python_version.py` keeps the other copies in step |
 | `src/burnbird/` | The application package |
+| `src/burnbird/providers.toml` | The provider table: each runner size's label patterns and its price or weight a minute, with the pages each fact comes from and the date they were read |
+| `src/burnbird/providers.py` | Loads the provider table and refuses an invalid one, naming the row |
+| `src/burnbird/classify.py` | Classifies a job: its provider, runner size and price or weight a minute |
 | `tests/` | Its tests |
 | `LICENSE` | The licence, FSL-1.1-MIT, unchanged except its copyright line |
 | `SECURITY.md` | How to report a vulnerability |
-| `.gitleaks.toml`, `.pre-commit-config.yaml` | The leak patterns and the commit-time hook |
+| `.gitleaks.toml`, `.pre-commit-config.yaml` | The leak patterns and the commit-time hook; the `url-host` rule's last list holds the reviewed hosts only this repository cites |
 | `.github/CODEOWNERS` | Who reviews every change |
 | `.github/workflows/` | CI (Python, gitleaks, zizmor, suppressions, commit policy), dependency-age and its daily re-run for Dependabot pull requests, links, CodeQL and Scorecard |
 | `.github/scripts/` | The commit policy check and its tests |
 | `.github/requirements/` | Hash-pinned CI tools (zizmor) |
 | `.github/dependabot.yml` | Monthly grouped updates for the Python packages, the actions and the CI tools |
 | `.suppressions` | Every lint suppression, one line each (none yet) |
+
+## Adding a provider or a runner size
+
+One pull request:
+
+1. Add rows to `src/burnbird/providers.toml`: one row per runner size, its price or weight written out as a string,
+   and the pages its facts come from with the date you read them. A new host also goes in the `url-host` rule's
+   repository list in `.gitleaks.toml`.
+2. Add one fixture job per new row to `FIXTURES` in `tests/test_classify.py`; the coverage test fails for a row
+   without one.
+3. A new runner size of a listed provider is data only. A new provider also needs its step in the classification
+   order in `src/burnbird/classify.py`, and code changes for a new rounding rule or a new kind of allowance.
 
 ## Boundaries
 

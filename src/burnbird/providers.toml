@@ -1,0 +1,634 @@
+# Which provider runs a job, and what a minute costs. Data only: burnbird/providers.py reads and validates it, and
+# nothing in it is ever evaluated. Money and weights are strings, read as Decimal. Every row names the pages its
+# facts come from and the date they were read. Label patterns are matched with fnmatch.fnmatchcase.
+#
+# [B]  https://docs.github.com/en/billing/concepts/product-billing/github-actions
+# [P]  https://docs.github.com/en/billing/reference/actions-runner-pricing
+# [H]  https://docs.github.com/en/actions/reference/runners/github-hosted-runners
+# [L]  https://docs.github.com/en/actions/reference/runners/larger-runners
+# [R]  https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job
+# [BS] https://docs.blacksmith.sh/blacksmith-runners/overview
+
+# GitHub rounds each job up to a whole minute [P]. Included usage is money, reset each billing cycle [B].
+[[provider]]
+id = "github"
+name = "GitHub-hosted"
+rounding = "job-up-to-minute"
+estimate = false
+sources = [
+    "https://docs.github.com/en/billing/concepts/product-billing/github-actions",
+    "https://docs.github.com/en/billing/reference/actions-runner-pricing",
+]
+read = "2026-11-13"
+
+[[provider.allowance]]
+plan = "GitHub Free"
+amount = "12"
+unit = "usd"
+period = "billing-cycle"
+
+[[provider.allowance]]
+plan = "GitHub Pro"
+amount = "18"
+unit = "usd"
+period = "billing-cycle"
+
+[[provider.allowance]]
+plan = "GitHub Free for organizations"
+amount = "12"
+unit = "usd"
+period = "billing-cycle"
+
+[[provider.allowance]]
+plan = "GitHub Team"
+amount = "18"
+unit = "usd"
+period = "billing-cycle"
+
+[[provider.allowance]]
+plan = "GitHub Enterprise Cloud"
+amount = "300"
+unit = "usd"
+period = "billing-cycle"
+
+# Blacksmith states neither rounding nor its reset day [BS]; jobs are counted as rounded up to a whole minute, as
+# GitHub does, and its numbers are shown as an estimate.
+[[provider]]
+id = "blacksmith"
+name = "Blacksmith"
+rounding = "job-up-to-minute"
+estimate = true
+sources = ["https://docs.blacksmith.sh/blacksmith-runners/overview"]
+read = "2026-11-13"
+
+[[provider.allowance]]
+plan = "every organization"
+amount = "3000"
+unit = "x64-2vcpu-minute"
+period = "month"
+
+# Self-hosted runners are free and have no allowance [B]: exact time, no rounding.
+[[provider]]
+id = "self-hosted"
+name = "Self-hosted"
+rounding = "none"
+estimate = false
+sources = ["https://docs.github.com/en/billing/concepts/product-billing/github-actions"]
+read = "2026-11-13"
+
+# GitHub-hosted standard runners. Ids are GitHub's SKU names. Free in public repositories [B].
+
+[[runner]]
+provider = "github"
+id = "actions_linux_slim"
+name = "Linux 1-core (x64)"
+kind = "standard"
+labels = ["ubuntu-slim"]
+usd_per_minute = "0.002"
+sources = [
+    "https://docs.github.com/en/billing/reference/actions-runner-pricing",
+    "https://docs.github.com/en/billing/concepts/product-billing/github-actions",
+    "https://docs.github.com/en/actions/reference/runners/github-hosted-runners",
+]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "actions_linux"
+name = "Linux 2-core (x64)"
+kind = "standard"
+labels = ["ubuntu-latest", "ubuntu-[0-9][0-9].04"]
+usd_per_minute = "0.006"
+sources = [
+    "https://docs.github.com/en/billing/reference/actions-runner-pricing",
+    "https://docs.github.com/en/billing/concepts/product-billing/github-actions",
+    "https://docs.github.com/en/actions/reference/runners/github-hosted-runners",
+]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "actions_linux_arm"
+name = "Linux 2-core (arm64)"
+kind = "standard"
+labels = ["ubuntu-[0-9][0-9].04-arm"]
+usd_per_minute = "0.005"
+sources = [
+    "https://docs.github.com/en/billing/reference/actions-runner-pricing",
+    "https://docs.github.com/en/billing/concepts/product-billing/github-actions",
+    "https://docs.github.com/en/actions/reference/runners/github-hosted-runners",
+]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "actions_windows"
+name = "Windows 2-core (x64)"
+kind = "standard"
+labels = ["windows-latest", "windows-[0-9][0-9][0-9][0-9]", "windows-[0-9][0-9][0-9][0-9]-vs[0-9][0-9][0-9][0-9]"]
+usd_per_minute = "0.010"
+sources = [
+    "https://docs.github.com/en/billing/reference/actions-runner-pricing",
+    "https://docs.github.com/en/billing/concepts/product-billing/github-actions",
+    "https://docs.github.com/en/actions/reference/runners/github-hosted-runners",
+]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "actions_windows_arm"
+name = "Windows 2-core (arm64)"
+kind = "standard"
+labels = ["windows-11-arm", "windows-11-vs[0-9][0-9][0-9][0-9]-arm"]
+usd_per_minute = "0.010"
+sources = [
+    "https://docs.github.com/en/billing/reference/actions-runner-pricing",
+    "https://docs.github.com/en/billing/concepts/product-billing/github-actions",
+    "https://docs.github.com/en/actions/reference/runners/github-hosted-runners",
+]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "actions_macos"
+name = "macOS 3-core or 4-core (M1 or Intel)"
+kind = "standard"
+labels = ["macos-latest", "macos-[0-9][0-9]", "macos-[0-9][0-9]-intel", "xcode-[0-9][0-9]"]
+usd_per_minute = "0.062"
+sources = [
+    "https://docs.github.com/en/billing/reference/actions-runner-pricing",
+    "https://docs.github.com/en/billing/concepts/product-billing/github-actions",
+    "https://docs.github.com/en/actions/reference/runners/github-hosted-runners",
+]
+read = "2026-11-13"
+
+# GitHub-hosted larger runners. Never free, public repositories included [P]. Linux and Windows
+# larger runners carry labels chosen when they are created, so those rows have none: a job reaches them
+# only through the user's label-to-size setting. GitHub names the macOS ones itself [L].
+
+[[runner]]
+provider = "github"
+id = "linux_2_core_advanced"
+name = "Linux Advanced 2-core (x64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.006"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "linux_4_core"
+name = "Linux 4-core (x64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.012"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "linux_8_core"
+name = "Linux 8-core (x64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.022"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "linux_16_core"
+name = "Linux 16-core (x64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.042"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "linux_32_core"
+name = "Linux 32-core (x64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.082"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "linux_64_core"
+name = "Linux 64-core (x64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.162"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "linux_96_core"
+name = "Linux 96-core (x64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.252"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "windows_4_core"
+name = "Windows 4-core (x64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.022"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "windows_8_core"
+name = "Windows 8-core (x64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.042"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "windows_16_core"
+name = "Windows 16-core (x64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.082"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "windows_32_core"
+name = "Windows 32-core (x64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.162"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "windows_64_core"
+name = "Windows 64-core (x64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.322"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "windows_96_core"
+name = "Windows 96-core (x64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.552"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "macos_l"
+name = "macOS 12-core (x64)"
+kind = "larger"
+labels = ["macos-latest-large", "macos-[0-9][0-9]-large"]
+usd_per_minute = "0.077"
+sources = [
+    "https://docs.github.com/en/billing/reference/actions-runner-pricing",
+    "https://docs.github.com/en/actions/reference/runners/larger-runners",
+]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "linux_2_core_arm"
+name = "Linux 2-core (arm64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.005"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "linux_4_core_arm"
+name = "Linux 4-core (arm64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.008"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "linux_8_core_arm"
+name = "Linux 8-core (arm64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.014"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "linux_16_core_arm"
+name = "Linux 16-core (arm64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.026"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "linux_32_core_arm"
+name = "Linux 32-core (arm64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.050"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "linux_64_core_arm"
+name = "Linux 64-core (arm64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.098"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "windows_2_core_arm"
+name = "Windows 2-core (arm64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.008"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "windows_4_core_arm"
+name = "Windows 4-core (arm64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.014"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "windows_8_core_arm"
+name = "Windows 8-core (arm64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.026"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "windows_16_core_arm"
+name = "Windows 16-core (arm64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.050"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "windows_32_core_arm"
+name = "Windows 32-core (arm64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.098"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "windows_64_core_arm"
+name = "Windows 64-core (arm64)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.194"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "macos_xl"
+name = "macOS 5-core (M2 Pro)"
+kind = "larger"
+labels = ["macos-latest-xlarge", "macos-[0-9][0-9]-xlarge", "xcode-[0-9][0-9]-xlarge"]
+usd_per_minute = "0.102"
+sources = [
+    "https://docs.github.com/en/billing/reference/actions-runner-pricing",
+    "https://docs.github.com/en/actions/reference/runners/larger-runners",
+]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "linux_4_core_gpu"
+name = "Linux 4-core (GPU)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.052"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "github"
+id = "windows_4_core_gpu"
+name = "Windows 4-core (GPU)"
+kind = "larger"
+labels = []
+usd_per_minute = "0.102"
+sources = ["https://docs.github.com/en/billing/reference/actions-runner-pricing"]
+read = "2026-11-13"
+
+# Blacksmith. Weight: x64 2-vCPU minutes of the free allowance used per minute [BS]: x64 vCPU/2,
+# ARM 0.625 per 2 vCPU, Windows 2 per 2 vCPU, macOS 20 per 6 vCPU. Ubuntu 22.04 labels are deprecated
+# but still listed.
+
+[[runner]]
+provider = "blacksmith"
+id = "linux-x64-2vcpu"
+name = "Ubuntu x64 2 vCPU"
+labels = ["blacksmith-2vcpu-ubuntu-[0-9][0-9][0-9][0-9]"]
+weight = "1"
+sources = ["https://docs.blacksmith.sh/blacksmith-runners/overview"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "blacksmith"
+id = "linux-x64-4vcpu"
+name = "Ubuntu x64 4 vCPU"
+labels = ["blacksmith-4vcpu-ubuntu-[0-9][0-9][0-9][0-9]"]
+weight = "2"
+sources = ["https://docs.blacksmith.sh/blacksmith-runners/overview"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "blacksmith"
+id = "linux-x64-8vcpu"
+name = "Ubuntu x64 8 vCPU"
+labels = ["blacksmith-8vcpu-ubuntu-[0-9][0-9][0-9][0-9]"]
+weight = "4"
+sources = ["https://docs.blacksmith.sh/blacksmith-runners/overview"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "blacksmith"
+id = "linux-x64-16vcpu"
+name = "Ubuntu x64 16 vCPU"
+labels = ["blacksmith-16vcpu-ubuntu-[0-9][0-9][0-9][0-9]"]
+weight = "8"
+sources = ["https://docs.blacksmith.sh/blacksmith-runners/overview"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "blacksmith"
+id = "linux-x64-32vcpu"
+name = "Ubuntu x64 32 vCPU"
+labels = ["blacksmith-32vcpu-ubuntu-[0-9][0-9][0-9][0-9]"]
+weight = "16"
+sources = ["https://docs.blacksmith.sh/blacksmith-runners/overview"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "blacksmith"
+id = "linux-arm-2vcpu"
+name = "Ubuntu ARM 2 vCPU"
+labels = ["blacksmith-2vcpu-ubuntu-[0-9][0-9][0-9][0-9]-arm"]
+weight = "0.625"
+sources = ["https://docs.blacksmith.sh/blacksmith-runners/overview"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "blacksmith"
+id = "linux-arm-4vcpu"
+name = "Ubuntu ARM 4 vCPU"
+labels = ["blacksmith-4vcpu-ubuntu-[0-9][0-9][0-9][0-9]-arm"]
+weight = "1.25"
+sources = ["https://docs.blacksmith.sh/blacksmith-runners/overview"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "blacksmith"
+id = "linux-arm-8vcpu"
+name = "Ubuntu ARM 8 vCPU"
+labels = ["blacksmith-8vcpu-ubuntu-[0-9][0-9][0-9][0-9]-arm"]
+weight = "2.5"
+sources = ["https://docs.blacksmith.sh/blacksmith-runners/overview"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "blacksmith"
+id = "linux-arm-16vcpu"
+name = "Ubuntu ARM 16 vCPU"
+labels = ["blacksmith-16vcpu-ubuntu-[0-9][0-9][0-9][0-9]-arm"]
+weight = "5"
+sources = ["https://docs.blacksmith.sh/blacksmith-runners/overview"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "blacksmith"
+id = "linux-arm-32vcpu"
+name = "Ubuntu ARM 32 vCPU"
+labels = ["blacksmith-32vcpu-ubuntu-[0-9][0-9][0-9][0-9]-arm"]
+weight = "10"
+sources = ["https://docs.blacksmith.sh/blacksmith-runners/overview"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "blacksmith"
+id = "windows-x64-2vcpu"
+name = "Windows x64 2 vCPU"
+labels = ["blacksmith-2vcpu-windows-[0-9][0-9][0-9][0-9]"]
+weight = "2"
+sources = ["https://docs.blacksmith.sh/blacksmith-runners/overview"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "blacksmith"
+id = "windows-x64-4vcpu"
+name = "Windows x64 4 vCPU"
+labels = ["blacksmith-4vcpu-windows-[0-9][0-9][0-9][0-9]"]
+weight = "4"
+sources = ["https://docs.blacksmith.sh/blacksmith-runners/overview"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "blacksmith"
+id = "windows-x64-8vcpu"
+name = "Windows x64 8 vCPU"
+labels = ["blacksmith-8vcpu-windows-[0-9][0-9][0-9][0-9]"]
+weight = "8"
+sources = ["https://docs.blacksmith.sh/blacksmith-runners/overview"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "blacksmith"
+id = "windows-x64-16vcpu"
+name = "Windows x64 16 vCPU"
+labels = ["blacksmith-16vcpu-windows-[0-9][0-9][0-9][0-9]"]
+weight = "16"
+sources = ["https://docs.blacksmith.sh/blacksmith-runners/overview"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "blacksmith"
+id = "windows-x64-32vcpu"
+name = "Windows x64 32 vCPU"
+labels = ["blacksmith-32vcpu-windows-[0-9][0-9][0-9][0-9]"]
+weight = "32"
+sources = ["https://docs.blacksmith.sh/blacksmith-runners/overview"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "blacksmith"
+id = "macos-6vcpu"
+name = "macOS 6 vCPU"
+labels = ["blacksmith-6vcpu-macos-*"]
+weight = "20"
+sources = ["https://docs.blacksmith.sh/blacksmith-runners/overview"]
+read = "2026-11-13"
+
+[[runner]]
+provider = "blacksmith"
+id = "macos-12vcpu"
+name = "macOS 12 vCPU"
+labels = ["blacksmith-12vcpu-macos-*"]
+weight = "40"
+sources = ["https://docs.blacksmith.sh/blacksmith-runners/overview"]
+read = "2026-11-13"
+
+# Self-hosted runners: free, no allowance [B]. GitHub adds the self-hosted label by default [R].
+
+[[runner]]
+provider = "self-hosted"
+id = "self-hosted"
+name = "Self-hosted"
+labels = ["self-hosted"]
+usd_per_minute = "0"
+sources = [
+    "https://docs.github.com/en/billing/concepts/product-billing/github-actions",
+    "https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job",
+]
+read = "2026-11-13"

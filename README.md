@@ -36,7 +36,8 @@ uv run --locked pytest
 uv lock --check
 ```
 
-The full list of commands, with the CI job that runs each, is in [CONTRIBUTING.md](CONTRIBUTING.md).
+The tests need a throwaway Postgres; CONTRIBUTING.md says how to start one. The full list of commands, with the CI
+job that runs each, is in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Contributing and security
 

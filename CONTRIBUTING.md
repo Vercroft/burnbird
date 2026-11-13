@@ -27,6 +27,16 @@ Set up once: install [uv](https://docs.astral.sh/uv/), which installs the Python
 `gitleaks` CI job; and `VENV="${TMPDIR:-/tmp}/burnbird-venv"; python3 -m venv "$VENV"` for the workflow audit. Each
 row is what CI runs, in the job named in the last column.
 
+The storage tests need a throwaway Postgres, named in `BURNBIRD_TEST_DATABASE_URL`; without it they fail, never skip.
+Start one with Docker, from the image the CI job pins (it is written only there), and stop it when you are done:
+
+```sh
+docker run --rm -d --name burnbird-test-postgres -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=burnbird_test \
+  -p 127.0.0.1:55432:5432 "$(grep -oE 'postgres:[^ ]+@sha256:[0-9a-f]{64}' .github/workflows/ci.yml)"
+export BURNBIRD_TEST_DATABASE_URL=postgresql+psycopg://postgres@127.0.0.1:55432/burnbird_test
+docker stop burnbird-test-postgres
+```
+
 | To | Run | CI job |
 |---|---|---|
 | Install the project and its dev tools | `uv sync --locked` | Python |
@@ -34,8 +44,9 @@ row is what CI runs, in the job named in the last column.
 | Lint | `uv run --locked ruff check` | Python |
 | Check types | `uv run --locked mypy` | Python |
 | Check the Python version agrees everywhere | `uv run --locked pytest tests/test_python_version.py` | Python |
-| Run the tests (one test: `uv run --locked pytest tests/test_package.py`) | `uv run --locked pytest` | Python |
+| Run the tests, with the test Postgres (one test: `uv run --locked pytest tests/test_package.py`) | `uv run --locked pytest` | Python |
 | Check every locked package is at least 7 days old | `uv lock --check` | dependency-age |
+| Check every image your branch adds is at least 7 days old (needs Docker with buildx) | `python3 scripts/check-image-age.py --base origin/main` | dependency-age |
 | Scan for secrets | `pre-commit run --all-files` | gitleaks |
 | Audit the workflows | `"$VENV/bin/pip" install --require-hashes -r .github/requirements/zizmor.txt`, then `"$VENV/bin/zizmor" --offline .github/workflows` | zizmor |
 | Test the commit policy | `python3 -m unittest discover --start-directory .github/scripts --pattern 'test_*.py'` | Commit policy |
@@ -61,16 +72,21 @@ messages, the pull request title or its description. Its output names only the c
 | `src/burnbird/classify.py` | Classifies a job: its provider, runner size and price or weight a minute |
 | `src/burnbird/counting.py` | Bills a job: its minutes after the provider's rounding, its dollars or allowance units, and the day it counts on |
 | `src/burnbird/forecast.py` | An allowance's cycle, use, pace and run-out date, and its warnings as data |
-| `tests/` | Its tests |
+| `src/burnbird/models.py` | The stored tables |
+| `src/burnbird/database.py` | The database URL from the environment, and an engine whose connections and statements time out |
+| `src/burnbird/migrations/` | The Alembic migrations, shipped inside the package; `[tool.alembic]` in `pyproject.toml` points at them |
+| `src/burnbird/retention.py` | What is deleted and when: jobs after 90 days, deliveries after 7, expired sessions, "Delete my data" and an uninstall |
+| `tests/` | Its tests; `tests/conftest.py` gives the storage tests a migrated Postgres and rolls each test back |
+| `scripts/check-image-age.py`, `tests/test_check_image_age.py` | The image-age check and its test, vendored unchanged; `tests/test_vendored.py` holds their recorded sha256 |
 | `LICENSE` | The licence, FSL-1.1-MIT, unchanged except its copyright line |
 | `SECURITY.md` | How to report a vulnerability |
 | `.gitleaks.toml`, `.pre-commit-config.yaml` | The leak patterns and the commit-time hook; the `url-host` rule's last list holds the reviewed hosts only this repository cites |
 | `.github/CODEOWNERS` | Who reviews every change |
-| `.github/workflows/` | CI (Python, gitleaks, zizmor, suppressions, commit policy), dependency-age and its daily re-run for Dependabot pull requests, links, CodeQL and Scorecard |
+| `.github/workflows/` | CI (Python with its Postgres service, gitleaks, zizmor, suppressions, commit policy), dependency-age (packages and images) and its daily re-run for Dependabot pull requests, links, CodeQL and Scorecard |
 | `.github/scripts/` | The commit policy check and its tests |
 | `.github/requirements/` | Hash-pinned CI tools (zizmor) |
-| `.github/dependabot.yml` | Monthly grouped updates for the Python packages, the actions and the CI tools |
-| `.suppressions` | Every lint suppression, one line each (none yet) |
+| `.github/dependabot.yml` | Monthly grouped updates for the Python packages, the actions, the workflow images and the CI tools; `tests/test_images.py` checks the images are pinned and Postgres majors are held |
+| `.suppressions` | Every lint suppression, one line each |
 
 ## Adding a provider or a runner size
 
@@ -95,5 +111,14 @@ One pull request:
   `.suppressions` as `path: comment`, sorted; the `Suppressions are listed` job fails on any difference.
 - Test fixtures never hold a real secret, a real person's address or an em or en dash: build planted values at run
   time.
+- The database URL comes only from the environment (`BURNBIRD_DATABASE_URL`; `BURNBIRD_TEST_DATABASE_URL` for the
+  tests), never from a file. The tests refuse any database not named `burnbird_test`.
+- A schema change is a new migration in `src/burnbird/migrations/versions/` (`uv run --locked alembic revision
+  --autogenerate`), never an edit to one already merged; `tests/test_migration.py` fails when the models and the
+  migrations differ.
+- Every image a workflow uses is pinned as `name:tag@sha256:<digest>` and written once; `tests/test_images.py` fails on
+  a new image until it is classified.
+- `scripts/check-image-age.py` and `tests/test_check_image_age.py` are never edited here; a new version replaces both
+  files unchanged, with its new sha256 in `tests/test_vendored.py`.
 - `LICENSE` stays the published text, with only its copyright line filled in.
 - Call the licence "Fair Source (FSL-1.1-MIT)".

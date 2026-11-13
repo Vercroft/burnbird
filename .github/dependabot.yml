@@ -37,6 +37,25 @@ updates:
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
     open-pull-requests-limit: 3
 
+  # Images in the workflows: the Postgres service of the Python job. Dependabot's docker updater
+  # reads every YAML file of this folder and each "image:" key in it. Postgres is a database, so
+  # a new major is a planned change; its minors, patches and digest refreshes arrive monthly.
+  - package-ecosystem: docker
+    directory: /.github/workflows
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      docker-minor-and-patch:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: postgres
+        update-types: ["version-update:semver-major"]
+    open-pull-requests-limit: 3
+
   # The hash-pinned CI tools (zizmor).
   - package-ecosystem: pip
     directory: /.github/requirements

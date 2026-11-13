@@ -1,0 +1,77 @@
+"""A real Postgres for the storage tests, migrated once, with every test rolled back.
+
+The URL comes from BURNBIRD_TEST_DATABASE_URL. Without it the storage tests fail rather than skip,
+so a run without a database cannot pass. The guard refuses any database not named burnbird_test.
+"""
+
+import functools
+import os
+from collections.abc import Callable, Iterator
+from pathlib import Path
+
+import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import Connection, Engine, make_url
+from sqlalchemy.orm import Session
+
+from burnbird.database import DATABASE_URL_VARIABLE, make_engine
+
+TEST_URL_VARIABLE = "BURNBIRD_TEST_DATABASE_URL"
+TEST_DATABASE = "burnbird_test"
+PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
+
+
+@pytest.fixture(scope="session")
+def database_url() -> str:
+    url = os.environ.get(TEST_URL_VARIABLE)
+    if not url:
+        pytest.fail(f"set {TEST_URL_VARIABLE} to a throwaway Postgres (see CONTRIBUTING.md)")
+    # The guard: never touch any database but the throwaway one.
+    if make_url(url).database != TEST_DATABASE:
+        pytest.fail(f"{TEST_URL_VARIABLE} must name the database {TEST_DATABASE}")
+    return url
+
+
+def _migrate(database_url: str, revision: str, *, up: bool) -> None:
+    # The repository's own Alembic configuration, as the command line reads it.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv(DATABASE_URL_VARIABLE, database_url)
+        config = Config(toml_file=str(PYPROJECT))
+        if up:
+            command.upgrade(config, revision)
+        else:
+            command.downgrade(config, revision)
+
+
+@pytest.fixture(scope="session")
+def upgrade(database_url: str) -> Callable[[str], None]:
+    return functools.partial(_migrate, database_url, up=True)
+
+
+@pytest.fixture(scope="session")
+def downgrade(database_url: str) -> Callable[[str], None]:
+    return functools.partial(_migrate, database_url, up=False)
+
+
+@pytest.fixture(scope="session")
+def engine(database_url: str) -> Iterator[Engine]:
+    _migrate(database_url, "head", up=True)
+    engine = make_engine(database_url)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture
+def connection(engine: Engine) -> Iterator[Connection]:
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        yield connection
+        transaction.rollback()
+
+
+@pytest.fixture
+def session(connection: Connection) -> Iterator[Session]:
+    # Commits inside a test become savepoints; the outer transaction is rolled back after it.
+    with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
+        yield session

@@ -66,17 +66,18 @@ messages, the pull request title or its description. Its output names only the c
 | `README.md` | What Burnbird is |
 | `pyproject.toml`, `uv.lock` | The Python project, its dev tools (exact pins) and the lint, type and test settings |
 | `.python-version` | The one Python version; `tests/test_python_version.py` keeps the other copies in step |
-| `src/burnbird/` | The application package |
-| `src/burnbird/providers.toml` | The provider table: each runner size's label patterns and its price or weight a minute, with the pages each fact comes from and the date they were read |
-| `src/burnbird/providers.py` | Loads the provider table and refuses an invalid one, naming the row |
-| `src/burnbird/classify.py` | Classifies a job: its provider, runner size and price or weight a minute |
-| `src/burnbird/counting.py` | Bills a job: its minutes after the provider's rounding, its dollars or allowance units, and the day it counts on |
-| `src/burnbird/forecast.py` | An allowance's cycle, use, pace and run-out date, and its warnings as data |
+| `src/burnbird/` | The application package: one folder per feature, and the shared storage modules at its root |
+| `src/burnbird/billing/` | Billing: the provider table, job classification, minute counting and the run-out forecast |
+| `src/burnbird/billing/providers.toml` | The provider table: each runner size's label patterns and its price or weight a minute, with the pages each fact comes from and the date they were read |
+| `src/burnbird/billing/providers.py` | Loads the provider table and refuses an invalid one, naming the row |
+| `src/burnbird/billing/classify.py` | Classifies a job: its provider, runner size and price or weight a minute |
+| `src/burnbird/billing/counting.py` | Bills a job: its minutes after the provider's rounding, its dollars or allowance units, and the day it counts on |
+| `src/burnbird/billing/forecast.py` | An allowance's cycle, use, pace and run-out date, and its warnings as data |
 | `src/burnbird/models.py` | The stored tables |
 | `src/burnbird/database.py` | The database URL from the environment, and an engine whose connections and statements time out |
 | `src/burnbird/migrations/` | The Alembic migrations, shipped inside the package; `[tool.alembic]` in `pyproject.toml` points at them |
 | `src/burnbird/retention.py` | What is deleted and when: jobs after 90 days, deliveries after 7, expired sessions, "Delete my data" and an uninstall |
-| `tests/` | Its tests; `tests/conftest.py` gives the storage tests a migrated Postgres and rolls each test back |
+| `tests/` | Its tests, in folders that mirror the feature folders (`tests/billing/`), each with an `__init__.py` so mypy accepts the same test file name in two folders; `tests/conftest.py` gives the storage tests a migrated Postgres and rolls each test back |
 | `scripts/check-image-age.py`, `tests/test_check_image_age.py` | The image-age check and its test, vendored unchanged; `tests/test_vendored.py` holds their recorded sha256 |
 | `LICENSE` | The licence, FSL-1.1-MIT, unchanged except its copyright line |
 | `SECURITY.md` | How to report a vulnerability |
@@ -92,13 +93,13 @@ messages, the pull request title or its description. Its output names only the c
 
 One pull request:
 
-1. Add rows to `src/burnbird/providers.toml`: one row per runner size, its price or weight written out as a string,
+1. Add rows to `src/burnbird/billing/providers.toml`: one row per runner size, its price or weight written out as a string,
    and the pages its facts come from with the date you read them. A new host also goes in the `url-host` rule's
    repository list in `.gitleaks.toml`.
-2. Add one fixture job per new row to `FIXTURES` in `tests/test_classify.py`; the coverage test fails for a row
+2. Add one fixture job per new row to `FIXTURES` in `tests/billing/test_classify.py`; the coverage test fails for a row
    without one.
 3. A new runner size of a listed provider is data only. A new provider also needs its step in the classification
-   order in `src/burnbird/classify.py`, and code changes for a new rounding rule or a new kind of allowance.
+   order in `src/burnbird/billing/classify.py`, and code changes for a new rounding rule or a new kind of allowance.
 
 ## Boundaries
 

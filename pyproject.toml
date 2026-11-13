@@ -1,0 +1,91 @@
+[project]
+name = "burnbird"
+version = "0.0.0"
+description = "Every CI minute in one place, with a forecast of the day your free minutes run out."
+readme = "README.md"
+license = "FSL-1.1-MIT"
+license-files = ["LICENSE"]
+# The feature release of .python-version; tests/test_python_version.py keeps them in step.
+requires-python = ">=3.15,<3.16"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "mypy==2.4.1",
+    "pytest==9.2.0",
+    "ruff==0.17.4",
+]
+
+[build-system]
+requires = ["uv_build==0.13.7"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 99  # PEP 8's maximum for a team that agrees on it
+# target-version is read from [project] requires-python
+
+[tool.ruff.lint]
+select = [
+    "F", "E", "W",  # pyflakes, pycodestyle (E402 imports at top, E722 bare except)
+    "I",            # import sorting
+    "N",            # PEP 8 naming
+    "UP",           # current syntax for the minimum Python
+    "B",            # likely bugs (B904 raise from)
+    "SIM",          # simpler equivalents
+    "PTH",          # pathlib, not os.path
+    "RUF",          # ruff's own checks (RUF012 mutable class defaults)
+    "BLE",          # catch-all except only when logged or re-raised
+    "T20",          # no print
+    "LOG",          # logging misuse
+    "PGH",          # blanket suppressions
+    "TID",          # banned APIs, absolute imports
+    "ASYNC",        # blocking calls in async code
+    "PT",           # pytest style
+    "S",            # security (bandit)
+    "D",            # PEP 257 docstrings
+    "PLW0603",      # no global statement
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"os.path".msg = "Use pathlib."
+"sys.path".msg = "Install the project (uv sync); never edit sys.path."
+"threading.Thread".msg = "Use concurrent.futures or asyncio."
+"_thread".msg = "Use concurrent.futures or asyncio."
+"typing.no_type_check".msg = "Fix the types instead."
+
+[tool.ruff.lint.per-file-ignores]
+# Every entry says why. Tests assert (S101), and their names are their documentation (D).
+"tests/**" = ["S101", "D"]
+# Pre-standard code: the commit policy checker and its unittest tests predate this block.
+".github/scripts/**" = ["D101", "D102", "E501", "PT009", "PT027", "S603", "S607", "T201"]
+
+[tool.ruff.format]
+docstring-code-format = true
+# Pre-standard code, as in the per-file ignores above.
+exclude = [".github/scripts/**"]
+
+[tool.mypy]
+python_version = "3.15"  # the product's Python (rule 4)
+files = ["src", "tests"]
+strict = true
+warn_unreachable = true
+enable_error_code = [
+    "deprecated", "exhaustive-match", "explicit-override", "ignore-without-code",
+    "mutable-override", "possibly-undefined", "redundant-expr", "truthy-bool",
+    "truthy-iterable", "unimported-reveal", "unused-awaitable",
+]
+
+[tool.pytest]
+testpaths = ["tests"]
+addopts = ["--import-mode=importlib"]
+strict = true
+
+[tool.uv]
+exclude-newer = "7 days"
+no-build = true

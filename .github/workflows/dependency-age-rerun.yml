@@ -1,0 +1,36 @@
+name: dependency-age re-run
+
+# A Dependabot pull request whose versions are younger than 7 days fails dependency-age. Once a day
+# this re-runs that failed check, so the pull request turns green by itself when its versions come of
+# age. Dependabot pull requests are selected by the pull request's author, never by the actor.
+on:
+  schedule:
+    - cron: "23 5 * * *"
+
+permissions: {}
+
+jobs:
+  rerun:
+    name: Re-run failed dependency-age checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write # re-run a failed workflow run
+      pull-requests: read # list the open pull requests and their authors
+    steps:
+      - name: Re-run the failed dependency-age run of each open Dependabot pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          gh api --paginate "repos/$GH_REPO/pulls?state=open&per_page=100" \
+            --jq '.[] | select(.user.login == "dependabot[bot]") | .head.sha' |
+          while read -r sha; do
+            run_id=$(gh api "repos/$GH_REPO/actions/workflows/dependency-age.yml/runs?event=pull_request&head_sha=$sha&per_page=1" \
+              --jq '.workflow_runs[0] | select(.conclusion == "failure") | .id')
+            if [ -n "$run_id" ]; then
+              echo "Re-running run $run_id"
+              gh api --method POST "repos/$GH_REPO/actions/runs/$run_id/rerun-failed-jobs"
+            fi
+          done

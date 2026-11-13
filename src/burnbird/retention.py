@@ -1,10 +1,11 @@
-"""What is deleted, and when: retention past its limit, "Delete my data", and an uninstall.
+"""What is deleted, and when: retention, "Delete my data", uninstalls and removed repositories.
 
 Pure functions over a Session. They never commit: the caller runs each in one transaction, so a
 failure deletes nothing. Children are deleted before their parents, so every count is exact; the
 tables' ON DELETE CASCADE keys are only the safety net.
 """
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Final, cast
@@ -105,6 +106,23 @@ def uninstall(session: Session, installation_id: int) -> Deleted:
             session, delete(Installation).where(Installation.account_id == account_id)
         ),
         accounts=_count(session, delete(Account).where(Account.id == account_id)),
+    )
+
+
+def remove_repositories(
+    session: Session, installation_id: int, repository_ids: Collection[int]
+) -> Deleted:
+    """Delete repositories an installation can no longer access, and their jobs.
+
+    Only that installation's own repositories go: an ID it does not hold deletes nothing.
+    """
+    repositories = select(Repository.id).where(
+        Repository.installation_id == installation_id, Repository.id.in_(repository_ids)
+    )
+    # Keyword arguments run in order, so children go before their parents.
+    return Deleted(
+        jobs=_count(session, delete(Job).where(Job.repository_id.in_(repositories))),
+        repositories=_count(session, delete(Repository).where(Repository.id.in_(repositories))),
     )
 
 

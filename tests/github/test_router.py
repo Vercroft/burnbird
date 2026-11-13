@@ -245,7 +245,6 @@ def test_a_handled_event_of_the_wrong_shape_is_refused_and_logged_without_the_bo
         ("installation", "new_permissions_accepted"),
         ("installation_repositories", "added"),
         ("installation_target", "renamed"),
-        ("github_app_authorization", "revoked"),
     ],
 )
 def test_an_event_that_is_not_handled_is_answered_and_dropped(

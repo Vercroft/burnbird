@@ -106,6 +106,22 @@ class RepositoriesRemoved(Payload):
     repositories_removed: tuple[RepositoryRef, ...]
 
 
+class Sender(Payload):
+    """The account that caused an event."""
+
+    id: int
+
+
+class AuthorizationRevoked(Payload):
+    """``github_app_authorization`` with action ``revoked``; ``sender`` is the user who revoked.
+
+    GitHub's page lists no fields for it; the shape is octokit's payload schema
+    (https://github.com/octokit/webhooks, ``github_app_authorization/revoked``).
+    """
+
+    sender: Sender
+
+
 # Every (event, action) Burnbird stores, and the model of the fields it keeps. Any other pair is
 # answered and dropped.
 HANDLED: Final[Mapping[tuple[str, str], type[Payload]]] = MappingProxyType(
@@ -116,6 +132,7 @@ HANDLED: Final[Mapping[tuple[str, str], type[Payload]]] = MappingProxyType(
         ("installation", "suspend"): InstallationChanged,
         ("installation", "unsuspend"): InstallationChanged,
         ("installation_repositories", "removed"): RepositoriesRemoved,
+        ("github_app_authorization", "revoked"): AuthorizationRevoked,
     }
 )
 

@@ -15,6 +15,7 @@ TABLES = {
     "repository",
     "session",
     "user_installation",
+    "user_repository",
     "webhook_delivery",
 }
 

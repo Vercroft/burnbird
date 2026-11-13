@@ -16,9 +16,9 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from httpx2 import Response
-from sqlalchemy import Connection
 from sqlalchemy.orm import Session, sessionmaker
 
+from burnbird.auth.config import AuthSettings
 from burnbird.web import create_app
 
 type Body = dict[str, Any]
@@ -30,14 +30,10 @@ def webhook_secret() -> bytes:
 
 
 @pytest.fixture
-def sessions(connection: Connection) -> sessionmaker[Session]:
-    # Commits inside a test become savepoints of the test's rolled-back transaction.
-    return sessionmaker(bind=connection, join_transaction_mode="create_savepoint")
-
-
-@pytest.fixture
-def client(webhook_secret: bytes, sessions: sessionmaker[Session]) -> Iterator[TestClient]:
-    with TestClient(create_app(webhook_secret, sessions)) as client:
+def client(
+    webhook_secret: bytes, sessions: sessionmaker[Session], auth_settings: AuthSettings
+) -> Iterator[TestClient]:
+    with TestClient(create_app(webhook_secret, sessions, auth_settings)) as client:
         yield client
 
 

@@ -73,14 +73,16 @@ messages, the pull request title or its description. Its output names only the c
 | `src/burnbird/billing/classify.py` | Classifies a job: its provider, runner size and price or weight a minute |
 | `src/burnbird/billing/counting.py` | Bills a job: its minutes after the provider's rounding, its dollars or allowance units, and the day it counts on |
 | `src/burnbird/billing/forecast.py` | An allowance's cycle, use, pace and run-out date, and its warnings as data |
-| `src/burnbird/github/` | GitHub: `router.py` takes `POST /github/webhook` (signature, then the fields of a handled event, stored once); `schemas.py` names the fields kept per event; `signature.py` checks the HMAC; `events.py` is the worker's step that turns stored deliveries into jobs and installations; `config.py` reads the webhook secret |
+| `src/burnbird/github/` | GitHub: `router.py` takes `POST /github/webhook` (signature, then the fields of a handled event, stored once); `schemas.py` names the fields kept per event; `signature.py` checks the HMAC; `events.py` is the worker's step that turns stored deliveries into jobs, installations and deletions (an uninstall, removed repositories, a revoked authorization); `config.py` reads the secret files |
+| `src/burnbird/auth/` | Sign-in with GitHub: `router.py` takes `/auth/login`, `/auth/callback` and `/auth/logout`; `service.py` holds Authlib's GitHub client (state and the PKCE S256 verifier), the user's lists from GitHub and the one-transaction store; `dependencies.py` gives the signed-in user, the access filters and the CSRF check; `config.py` reads the settings |
+| `src/burnbird/logs.py` | The commands' logging: one formatter that redacts token-shaped values, `Authorization` values, OAuth secrets and the callback's code and state |
 | `src/burnbird/web.py` | Creates the web app: the body limit and each feature's router, nothing else |
 | `src/burnbird/worker.py` | One pass of the worker |
-| `src/burnbird/models.py` | The stored tables, webhook deliveries included (their validated fields only, never the body) |
+| `src/burnbird/models.py` | The stored tables, webhook deliveries included (their validated fields only, never the body), and each user's installations and repositories from their last sign-in |
 | `src/burnbird/database.py` | The database URL from the environment, and an engine whose connections and statements time out |
 | `src/burnbird/migrations/` | The Alembic migrations, shipped inside the package; `[tool.alembic]` in `pyproject.toml` points at them |
-| `src/burnbird/retention.py` | What is deleted and when: jobs after 90 days, deliveries after 7, expired sessions, "Delete my data", an uninstall, and repositories removed from an installation |
-| `tests/` | Its tests, in folders that mirror the feature folders (`tests/billing/`, `tests/github/`), each with an `__init__.py` so mypy accepts the same test file name in two folders; `tests/conftest.py` gives the storage tests a migrated Postgres and rolls each test back |
+| `src/burnbird/retention.py` | What is deleted and when: jobs after 90 days, deliveries after 7, expired sessions, "Delete my data", a revoked authorization, an uninstall, and repositories removed from an installation |
+| `tests/` | Its tests, in folders that mirror the feature folders (`tests/auth/`, `tests/billing/`, `tests/github/`), each with an `__init__.py` so mypy accepts the same test file name in two folders; `tests/conftest.py` gives the storage tests a migrated Postgres and rolls each test back |
 | `scripts/check-image-age.py`, `tests/test_check_image_age.py` | The image-age check and its test, vendored unchanged; `tests/test_vendored.py` holds their recorded sha256 |
 | `LICENSE` | The licence, FSL-1.1-MIT, unchanged except its copyright line |
 | `SECURITY.md` | How to report a vulnerability |
@@ -107,8 +109,23 @@ One pull request:
 ## Boundaries
 
 - Secrets never go in git.
-- The webhook secret is read only from the file named in `BURNBIRD_WEBHOOK_SECRET_FILE`; tests make a random one.
-- Endpoints are plain `def`; `async def` only for a dependency that awaits the request body and makes no blocking call.
+- Secrets are read only from files named in the environment: the webhook secret (`BURNBIRD_WEBHOOK_SECRET_FILE`), the
+  App's client secret (`BURNBIRD_GITHUB_CLIENT_SECRET_FILE`) and the OAuth state key (`BURNBIRD_OAUTH_STATE_KEY_FILE`,
+  32 characters or more). The client ID (`BURNBIRD_GITHUB_CLIENT_ID`) and the site's origin (`BURNBIRD_BASE_URL`,
+  `https://<host>` with no path) come from the environment. Tests make random values.
+- Endpoints are plain `def`; `async def` only for a dependency that awaits the request body and makes no blocking call,
+  and for `/auth/login` and `/auth/callback`, because Authlib's client is async; the callback's database work runs in
+  the thread pool.
+- `request.session` holds only Authlib's OAuth state, in the signed `__Host-burnbird_oauth` cookie: no code reads or
+  writes it except Authlib and the callback, which clears it. The sign-in session is the `__Host-burnbird_session`
+  cookie and the `session` table, which stores only its SHA-256.
+- Access: anything that names a repository, workflow, runner or label is filtered by `allowed_repositories`;
+  installation-wide totals and the forecast (numbers only, no names) need `allowed_installations`. GitHub lists an
+  installation for a user who can access any one of its repositories, so the installation filter alone would show
+  names a user cannot see. A foreign ID answers 404.
+- Every POST depends on `csrf_protected`: the `Origin` must be the site's origin exactly, and the form's `csrf_token`
+  must be the session's (`csrf_token(request)`).
+- No user access token is stored or logged; a sign-in uses it within its one request.
 - Every action in a workflow is pinned by full commit SHA with its release in a comment, and the release is at least 7
   days old.
 - Python packages are pinned exactly in `pyproject.toml` and locked in `uv.lock`; uv refuses versions younger than 7

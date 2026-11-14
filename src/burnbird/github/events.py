@@ -1,4 +1,4 @@
-"""The worker's GitHub step: turn stored webhook deliveries into job rows and installations.
+"""The worker's GitHub step: turn stored webhook deliveries into jobs, installations and deletions.
 
 One transaction per delivery. A delivery is claimed with ``FOR UPDATE SKIP LOCKED``, so two
 workers never take the same one; PostgreSQL: SKIP LOCKED "can be used to avoid lock contention with
@@ -134,8 +134,11 @@ def _job_completed(session: Session, data: dict[str, Any]) -> None:
     )
 
 
-def _installation_created(session: Session, data: dict[str, Any]) -> None:
-    installation = schemas.InstallationCreated.model_validate(data).installation
+def store_installation(session: Session, installation: schemas.Installation) -> None:
+    """Store an installation and its account; a repeat leaves a stored one as it is.
+
+    The webhook's ``installation.created`` and a sign-in's list of installations both use it.
+    """
     account = installation.account
     # An account holds one installation. Another one stored for it means its "deleted" delivery
     # was lost, so it is uninstalled the same way first.
@@ -172,6 +175,10 @@ def _installation_created(session: Session, data: dict[str, Any]) -> None:
     )
 
 
+def _installation_created(session: Session, data: dict[str, Any]) -> None:
+    store_installation(session, schemas.InstallationCreated.model_validate(data).installation)
+
+
 def _installation_deleted(session: Session, data: dict[str, Any]) -> None:
     retention.uninstall(session, schemas.InstallationChanged.model_validate(data).installation.id)
 
@@ -198,6 +205,12 @@ def _repositories_removed(session: Session, data: dict[str, Any]) -> None:
     )
 
 
+def _authorization_revoked(session: Session, data: dict[str, Any]) -> None:
+    retention.revoke_authorization(
+        session, schemas.AuthorizationRevoked.model_validate(data).sender.id
+    )
+
+
 # One handler per pair in schemas.HANDLED; a test keeps the two in step.
 HANDLERS: Final[Mapping[tuple[str, str], Callable[[Session, dict[str, Any]], None]]] = (
     MappingProxyType(
@@ -208,6 +221,7 @@ HANDLERS: Final[Mapping[tuple[str, str], Callable[[Session, dict[str, Any]], Non
             ("installation", "suspend"): _set_suspended(True),
             ("installation", "unsuspend"): _set_suspended(False),
             ("installation_repositories", "removed"): _repositories_removed,
+            ("github_app_authorization", "revoked"): _authorization_revoked,
         }
     )
 )

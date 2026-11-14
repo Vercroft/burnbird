@@ -5,7 +5,9 @@ so a run without a database cannot pass. The guard refuses any database not name
 """
 
 import functools
+import logging
 import os
+import secrets
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -13,8 +15,9 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import Connection, Engine, make_url
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
+from burnbird.auth.config import AuthSettings
 from burnbird.database import DATABASE_URL_VARIABLE, make_engine
 
 TEST_URL_VARIABLE = "BURNBIRD_TEST_DATABASE_URL"
@@ -75,3 +78,37 @@ def session(connection: Connection) -> Iterator[Session]:
     # Commits inside a test become savepoints; the outer transaction is rolled back after it.
     with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
         yield session
+
+
+@pytest.fixture
+def sessions(connection: Connection) -> sessionmaker[Session]:
+    # Commits inside a test become savepoints of the test's rolled-back transaction.
+    return sessionmaker(bind=connection, join_transaction_mode="create_savepoint")
+
+
+# The test client's own origin: cookies marked Secure are sent back only over https.
+ORIGIN = "https://burnbird.test"
+
+
+@pytest.fixture
+def auth_settings() -> AuthSettings:
+    """Sign-in settings with random secrets, made for each test."""
+    return AuthSettings(
+        client_id="Iv1.example",
+        client_secret=secrets.token_hex(20),
+        state_key=secrets.token_urlsafe(48),
+        origin=ORIGIN,
+    )
+
+
+@pytest.fixture
+def restore_logging() -> Iterator[None]:
+    """Put the logging set-up back after a test that configures it as a command does."""
+    root = logging.getLogger()
+    handlers, level = root.handlers[:], root.level
+    floors = {name: logging.getLogger(name).level for name in ("authlib",)}
+    yield
+    root.handlers[:] = handlers
+    root.setLevel(level)
+    for name, floor in floors.items():
+        logging.getLogger(name).setLevel(floor)

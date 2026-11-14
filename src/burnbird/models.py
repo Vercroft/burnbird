@@ -160,6 +160,23 @@ class UserInstallation(Base):
     )
 
 
+class UserRepository(Base):
+    """A repository a user could access at their last sign-in.
+
+    An installation is listed for a user who can access any one of its repositories, so pages that
+    name a repository filter by this table, not by ``user_installation``.
+    """
+
+    __tablename__ = "user_repository"
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("github_user.id", ondelete="CASCADE"), primary_key=True
+    )
+    repository_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("repository.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+
+
 class UserSession(Base):
     """A signed-in session, stored as the SHA-256 of its ID."""
 

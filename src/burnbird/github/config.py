@@ -9,21 +9,26 @@ WEBHOOK_FILE_VARIABLE: Final = "BURNBIRD_WEBHOOK_SECRET_FILE"
 
 
 class ConfigError(Exception):
-    """A secret file is not named, cannot be read or is empty; the message never holds a secret."""
+    """A setting is missing or invalid; the message never holds a secret."""
 
 
-def webhook_secret() -> bytes:
-    """Return the webhook secret from the file named in ``BURNBIRD_WEBHOOK_SECRET_FILE``.
+def read_secret_file(variable: str) -> bytes:
+    """Return the secret in the file named in the environment variable ``variable``.
 
     One trailing newline, as an editor or ``echo`` leaves it, is not part of the secret.
     """
-    path = os.environ.get(WEBHOOK_FILE_VARIABLE)
+    path = os.environ.get(variable)
     if not path:
-        raise ConfigError(f"set {WEBHOOK_FILE_VARIABLE} to the webhook secret's file")
+        raise ConfigError(f"set {variable} to the secret's file")
     try:
         secret = Path(path).read_bytes().removesuffix(b"\n")
     except OSError as err:
-        raise ConfigError(f"cannot read the file named in {WEBHOOK_FILE_VARIABLE}") from err
+        raise ConfigError(f"cannot read the file named in {variable}") from err
     if not secret:
-        raise ConfigError(f"the file named in {WEBHOOK_FILE_VARIABLE} is empty")
+        raise ConfigError(f"the file named in {variable} is empty")
     return secret
+
+
+def webhook_secret() -> bytes:
+    """Return the webhook secret from the file named in ``BURNBIRD_WEBHOOK_SECRET_FILE``."""
+    return read_secret_file(WEBHOOK_FILE_VARIABLE)

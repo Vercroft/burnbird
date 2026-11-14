@@ -16,6 +16,7 @@ from burnbird.models import (
     LabelSize,
     Repository,
     UserInstallation,
+    UserRepository,
     UserSession,
     WebhookDelivery,
 )
@@ -26,6 +27,7 @@ from burnbird.retention import (
     purge_jobs,
     purge_sessions,
     remove_repositories,
+    revoke_authorization,
     uninstall,
 )
 
@@ -132,6 +134,9 @@ def world(session: Session) -> Session:
             UserInstallation(user_id=PERSON, installation_id=INSTALLATION[ORG]),
             UserInstallation(user_id=MEMBER, installation_id=INSTALLATION[ORG]),
             UserInstallation(user_id=MEMBER, installation_id=INSTALLATION[OTHER_ORG]),
+            UserRepository(user_id=PERSON, repository_id=REPOSITORY[PERSON]),
+            UserRepository(user_id=PERSON, repository_id=REPOSITORY[ORG]),
+            UserRepository(user_id=MEMBER, repository_id=REPOSITORY[ORG]),
             _session(PERSON, NOW + timedelta(hours=1), 1),
             _session(PERSON, NOW + timedelta(hours=2), 2),
             _session(MEMBER, NOW + timedelta(hours=3), 3),
@@ -196,11 +201,14 @@ def test_a_time_without_a_timezone_is_refused(
 def test_delete_my_data_removes_the_user_and_their_personal_jobs_only(world: Session) -> None:
     before = _rows(world)
     deleted = delete_my_data(world, PERSON)
-    assert deleted == Deleted(jobs=2, sessions=2, user_installations=2, users=1)
+    assert deleted == Deleted(
+        jobs=2, sessions=2, user_installations=2, user_repositories=2, users=1
+    )
     assert _deleted(before, _rows(world)) == {
         "job": {(1, 1), (2, 1)},
         "session": {(bytes([1]) * 32,), (bytes([2]) * 32,)},
         "user_installation": {(PERSON, INSTALLATION[PERSON]), (PERSON, INSTALLATION[ORG])},
+        "user_repository": {(PERSON, REPOSITORY[PERSON]), (PERSON, REPOSITORY[ORG])},
         "github_user": {(PERSON,)},
     }
 
@@ -218,8 +226,31 @@ def test_delete_my_data_leaves_organisation_jobs(world: Session) -> None:
     job.repository_id = 5004
     world.add(job)
     before = _rows(world)
-    assert delete_my_data(world, MEMBER) == Deleted(sessions=1, user_installations=2, users=1)
+    assert delete_my_data(world, MEMBER) == Deleted(
+        sessions=1, user_installations=2, user_repositories=1, users=1
+    )
     assert "job" not in _deleted(before, _rows(world))
+
+
+# ---------- revoked authorization ----------
+
+
+def test_a_revoked_user_loses_sessions_and_lists_but_no_jobs(world: Session) -> None:
+    before = _rows(world)
+    deleted = revoke_authorization(world, PERSON)
+    assert deleted == Deleted(sessions=2, user_installations=2, user_repositories=2, users=1)
+    assert _deleted(before, _rows(world)) == {
+        "session": {(bytes([1]) * 32,), (bytes([2]) * 32,)},
+        "user_installation": {(PERSON, INSTALLATION[PERSON]), (PERSON, INSTALLATION[ORG])},
+        "user_repository": {(PERSON, REPOSITORY[PERSON]), (PERSON, REPOSITORY[ORG])},
+        "github_user": {(PERSON,)},
+    }
+
+
+def test_revoking_an_unknown_user_deletes_nothing(world: Session) -> None:
+    before = _rows(world)
+    assert revoke_authorization(world, 9999) == Deleted()
+    assert _rows(world) == before
 
 
 # ---------- uninstall ----------
@@ -229,7 +260,13 @@ def test_uninstall_removes_the_account_and_everything_under_it(world: Session) -
     before = _rows(world)
     deleted = uninstall(world, INSTALLATION[ORG])
     assert deleted == Deleted(
-        jobs=1, repositories=1, label_sizes=1, user_installations=2, installations=1, accounts=1
+        jobs=1,
+        user_repositories=2,
+        repositories=1,
+        label_sizes=1,
+        user_installations=2,
+        installations=1,
+        accounts=1,
     )
     assert _deleted(before, _rows(world)) == {
         "account": {(ORG,)},
@@ -238,6 +275,7 @@ def test_uninstall_removes_the_account_and_everything_under_it(world: Session) -
         "job": {(3, 1)},
         "label_size": {(ORG, "big-runner")},
         "user_installation": {(PERSON, INSTALLATION[ORG]), (MEMBER, INSTALLATION[ORG])},
+        "user_repository": {(PERSON, REPOSITORY[ORG]), (MEMBER, REPOSITORY[ORG])},
     }
 
 
@@ -253,8 +291,12 @@ def test_uninstalling_an_unknown_installation_deletes_nothing(world: Session) ->
 def test_removing_repositories_deletes_them_and_their_jobs(world: Session) -> None:
     before = _rows(world)
     deleted = remove_repositories(world, INSTALLATION[ORG], [REPOSITORY[ORG]])
-    assert deleted == Deleted(jobs=1, repositories=1)
-    assert _deleted(before, _rows(world)) == {"repository": {(REPOSITORY[ORG],)}, "job": {(3, 1)}}
+    assert deleted == Deleted(jobs=1, user_repositories=2, repositories=1)
+    assert _deleted(before, _rows(world)) == {
+        "repository": {(REPOSITORY[ORG],)},
+        "job": {(3, 1)},
+        "user_repository": {(PERSON, REPOSITORY[ORG]), (MEMBER, REPOSITORY[ORG])},
+    }
 
 
 def test_removing_another_installations_repository_deletes_nothing(world: Session) -> None:

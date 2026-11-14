@@ -12,7 +12,18 @@ from sqlalchemy.orm import Session, sessionmaker
 from burnbird.billing.classify import classify
 from burnbird.billing.providers import GITHUB, Kind, load_table
 from burnbird.github.events import MAX_ATTEMPTS, claim, process_next, process_pending
-from burnbird.models import Account, Installation, Job, LabelSize, Repository, WebhookDelivery
+from burnbird.models import (
+    Account,
+    GithubUser,
+    Installation,
+    Job,
+    LabelSize,
+    Repository,
+    UserInstallation,
+    UserRepository,
+    UserSession,
+    WebhookDelivery,
+)
 
 type Body = dict[str, Any]
 
@@ -394,6 +405,63 @@ def test_removed_repositories_go_with_their_jobs(
     session.expire_all()
     assert sorted(session.scalars(select(Repository.id))) == [REPOSITORY[OTHER_ORG], 5009]
     assert [job.id for job in _jobs(session)] == [9, OTHER_ORG]
+
+
+# ---------- revoked authorization ----------
+
+
+def _revoked(user: int) -> Body:
+    return {
+        "action": "revoked",
+        "sender": {"login": f"example-{user}", "id": user, "node_id": "N_example", "type": "User"},
+    }
+
+
+def test_a_revoked_authorization_signs_the_user_out_and_keeps_the_jobs(
+    deliver: Callable[..., Response],
+    installation: Callable[..., Body],
+    workflow_job: Callable[..., Body],
+    sessions: sessionmaker[Session],
+    session: Session,
+) -> None:
+    _install(deliver, installation, PERSON, kind="User")
+    _accepted(deliver("workflow_job", _job_body(workflow_job, PERSON)))
+    _run(sessions)
+    now = _now()
+    for user, n in ((PERSON, 1), (ORG, 2)):
+        session.add(GithubUser(id=user, login=f"example-{user}", last_sign_in_at=now))
+        session.flush()
+        session.add_all(
+            [
+                UserSession(
+                    id_sha256=bytes([n]) * 32,
+                    user_id=user,
+                    created_at=now,
+                    expires_at=now + timedelta(hours=8),
+                ),
+                UserInstallation(user_id=user, installation_id=INSTALLATION[PERSON]),
+                UserRepository(user_id=user, repository_id=REPOSITORY[PERSON]),
+            ]
+        )
+    session.flush()
+    _accepted(deliver("github_app_authorization", _revoked(PERSON)))
+    assert _run(sessions) == 1
+    session.expire_all()
+    # Only the revoking user goes; revoking is not uninstalling, so the jobs stay.
+    assert list(session.scalars(select(GithubUser.id))) == [ORG]
+    assert list(session.scalars(select(UserSession.user_id))) == [ORG]
+    assert list(session.scalars(select(UserInstallation.user_id))) == [ORG]
+    assert list(session.scalars(select(UserRepository.user_id))) == [ORG]
+    assert len(_jobs(session)) == 1
+
+
+def test_a_revoked_authorization_of_an_unknown_user_is_processed(
+    deliver: Callable[..., Response], sessions: sessionmaker[Session], session: Session
+) -> None:
+    delivery = str(uuid.uuid4())
+    _accepted(deliver("github_app_authorization", _revoked(9999), delivery=delivery))
+    assert _run(sessions) == 1
+    assert _delivery(session, delivery).processed_at is not None
 
 
 # ---------- two workers ----------

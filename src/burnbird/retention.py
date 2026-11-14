@@ -1,4 +1,4 @@
-"""What is deleted, and when: retention, "Delete my data", uninstalls and removed repositories.
+"""What is deleted, and when: retention, "Delete my data", revoked sign-ins, uninstalls, removals.
 
 Pure functions over a Session. They never commit: the caller runs each in one transaction, so a
 failure deletes nothing. Children are deleted before their parents, so every count is exact; the
@@ -21,6 +21,7 @@ from burnbird.models import (
     LabelSize,
     Repository,
     UserInstallation,
+    UserRepository,
     UserSession,
     WebhookDelivery,
 )
@@ -37,6 +38,7 @@ class Deleted:
     repositories: int = 0
     label_sizes: int = 0
     user_installations: int = 0
+    user_repositories: int = 0
     installations: int = 0
     accounts: int = 0
     sessions: int = 0
@@ -61,7 +63,7 @@ def purge_sessions(session: Session, now: datetime) -> int:
 
 
 def delete_my_data(session: Session, user_id: int) -> Deleted:
-    """Delete a user, their sessions and installation list, and their personal account's jobs.
+    """Delete a user, their sessions and access lists, and their personal account's jobs.
 
     The personal account is the account with the user's own ID and type ``User``. Organisation
     data stays: it belongs to the organisation and goes when the App is uninstalled.
@@ -72,19 +74,24 @@ def delete_my_data(session: Session, user_id: int) -> Deleted:
     # Keyword arguments run in order, so children go before their parents.
     return Deleted(
         jobs=_count(session, delete(Job).where(Job.repository_id.in_(_repositories(personal)))),
-        sessions=_count(session, delete(UserSession).where(UserSession.user_id == user_id)),
-        user_installations=_count(
-            session, delete(UserInstallation).where(UserInstallation.user_id == user_id)
-        ),
-        users=_count(session, delete(GithubUser).where(GithubUser.id == user_id)),
+        **_user_rows(session, user_id),
     )
+
+
+def revoke_authorization(session: Session, user_id: int) -> Deleted:
+    """Delete a user who revoked the App's authorization: their sessions and access lists.
+
+    Revoking does not uninstall the App, so every account's job data stays; it goes on uninstall.
+    A user who is not stored deletes nothing.
+    """
+    return Deleted(**_user_rows(session, user_id))
 
 
 def uninstall(session: Session, installation_id: int) -> Deleted:
     """Delete an installation's account and everything stored under it.
 
-    Users and their sessions stay; each user's list loses the installation. An installation that
-    is not stored deletes nothing.
+    Users and their sessions stay; each user's lists lose the installation and its repositories.
+    An installation that is not stored deletes nothing.
     """
     account_id = session.scalar(
         select(Installation.account_id).where(Installation.id == installation_id)
@@ -96,6 +103,7 @@ def uninstall(session: Session, installation_id: int) -> Deleted:
     # Keyword arguments run in order, so children go before their parents.
     return Deleted(
         jobs=_count(session, delete(Job).where(Job.repository_id.in_(repositories))),
+        user_repositories=_user_repositories(session, repositories),
         repositories=_count(session, delete(Repository).where(Repository.id.in_(repositories))),
         user_installations=_count(
             session,
@@ -122,7 +130,28 @@ def remove_repositories(
     # Keyword arguments run in order, so children go before their parents.
     return Deleted(
         jobs=_count(session, delete(Job).where(Job.repository_id.in_(repositories))),
+        user_repositories=_user_repositories(session, repositories),
         repositories=_count(session, delete(Repository).where(Repository.id.in_(repositories))),
+    )
+
+
+def _user_rows(session: Session, user_id: int) -> dict[str, int]:
+    # A dict keeps insertion order, so children go before their parents here too.
+    return {
+        "sessions": _count(session, delete(UserSession).where(UserSession.user_id == user_id)),
+        "user_installations": _count(
+            session, delete(UserInstallation).where(UserInstallation.user_id == user_id)
+        ),
+        "user_repositories": _count(
+            session, delete(UserRepository).where(UserRepository.user_id == user_id)
+        ),
+        "users": _count(session, delete(GithubUser).where(GithubUser.id == user_id)),
+    }
+
+
+def _user_repositories(session: Session, repositories: Select[int]) -> int:
+    return _count(
+        session, delete(UserRepository).where(UserRepository.repository_id.in_(repositories))
     )
 
 

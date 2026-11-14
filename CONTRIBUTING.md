@@ -84,7 +84,7 @@ messages, the pull request title or its description. Its output names only the c
 | `src/burnbird/billing/counting.py` | Bills a job: its minutes after the provider's rounding, its dollars or allowance units, and the day it counts on |
 | `src/burnbird/billing/forecast.py` | An allowance's cycle, use, pace and run-out date, and its warnings as data |
 | `src/burnbird/github/` | GitHub: `router.py` takes `POST /github/webhook` (signature, then the fields of a handled event, stored once); `schemas.py` names the fields kept per event; `signature.py` checks the HMAC; `events.py` is the worker's step that turns stored deliveries into jobs, installations and deletions (an uninstall, removed repositories, a revoked authorization); `client.py` is the App's own API client (the App JWT, installation tokens, paging, retries, rate limits); `reconcile.py` is the hourly reconciliation of the stored installations and repositories with GitHub's lists; `schedule.py` claims a due run of a periodic task and records how it ended; `config.py` reads the App's client ID and secret files |
-| `src/burnbird/auth/` | Sign-in with GitHub: `router.py` takes `/auth/login`, `/auth/callback` and `/auth/logout`; `service.py` holds Authlib's GitHub client (state and the PKCE S256 verifier), the user's lists from GitHub and the one-transaction store; `dependencies.py` gives the signed-in user, the access filters and the CSRF check; `config.py` reads the settings |
+| `src/burnbird/auth/` | Sign-in with GitHub: `router.py` takes `/auth/login`, `/auth/callback` and `/auth/logout`; `service.py` holds Authlib's GitHub client (state and the PKCE S256 verifier), the user's lists from GitHub and the one-transaction store; `dependencies.py` gives the signed-in user, the access filters, `account_access` (account-wide access) and the CSRF check; `config.py` reads the settings |
 | `src/burnbird/logs.py` | The commands' logging: one formatter that redacts token-shaped values, `Authorization` values, OAuth secrets and the callback's code and state |
 | `src/burnbird/web.py` | Creates the web app: the body limit and each feature's router, nothing else |
 | `src/burnbird/worker.py` | One pass of the worker: the stored deliveries, then the periodic tasks that are due, each step isolated |
@@ -130,10 +130,14 @@ One pull request:
 - `request.session` holds only Authlib's OAuth state, in the signed `__Host-burnbird_oauth` cookie: no code reads or
   writes it except Authlib and the callback, which clears it. The sign-in session is the `__Host-burnbird_session`
   cookie and the `session` table, which stores only its SHA-256.
-- Access: everything a page shows (names and numbers alike) is filtered by `allowed_repositories`. GitHub lists an
-  installation for anyone who can access one of its repositories, outside collaborators included, so
-  `allowed_installations` alone never grants a view or a setting. Account-wide numbers, the forecast and settings wait
-  for the account-wide access rule, which is decided before the dashboard is built. A foreign ID answers 404.
+- Access: everything a page shows about repositories (names and numbers alike) is filtered by `allowed_repositories`.
+  GitHub lists an installation for anyone who can access one of its repositories, outside collaborators included, so
+  `allowed_installations` alone never grants a view or a setting. Account-wide numbers, the forecast and settings need
+  `account_access`: a personal account's own user, or, for an organisation, a user with admin on every repository the
+  installation covers. Everyone else sees only their own repositories. The user's lists and admin flags come from
+  their last sign-in, so they can be up to one session (8 hours) old; the installation's repository list counts only
+  if the hourly reconciliation stored it within the last two hours. Access fails closed: an installation never synced
+  or not synced recently, one with no repository, or a user it is not listed for gets none. A foreign ID answers 404.
 - Every POST depends on `csrf_protected`: the `Origin` must be the site's origin exactly, and the form's `csrf_token`
   must be the session's (`csrf_token(request)`).
 - No user access token is stored or logged; a sign-in uses it within its one request.

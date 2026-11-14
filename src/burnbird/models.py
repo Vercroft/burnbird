@@ -164,10 +164,11 @@ class UserInstallation(Base):
 
 
 class UserRepository(Base):
-    """A repository a user could access at their last sign-in.
+    """A repository a user could access at their last sign-in, and whether they had admin on it.
 
     An installation is listed for a user who can access any one of its repositories, so pages that
-    name a repository filter by this table, not by ``user_installation``.
+    name a repository filter by this table, not by ``user_installation``. ``admin`` is GitHub's
+    ``permissions.admin`` for the user; it decides account-wide access (``account_access``).
     """
 
     __tablename__ = "user_repository"
@@ -178,6 +179,7 @@ class UserRepository(Base):
     repository_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("repository.id", ondelete="CASCADE"), primary_key=True, index=True
     )
+    admin: Mapped[bool] = mapped_column(server_default=false())
 
 
 class UserSession(Base):

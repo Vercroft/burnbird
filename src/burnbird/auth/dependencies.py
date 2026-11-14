@@ -1,11 +1,18 @@
 """Who is signed in, what they may see, and the CSRF check every POST runs.
 
-Everything a page shows (names and numbers alike) is filtered by ``allowed_repositories``. GitHub
-lists an installation for anyone who can access one of its repositories, outside collaborators
-included, so ``allowed_installations`` alone never grants a view or a setting. Account-wide
-numbers, the forecast and settings wait for the account-wide access rule, which is decided before
-the dashboard is built. A foreign ID answers 404, never 403, so a page does not reveal that it
-exists.
+Everything a page shows about repositories (names and numbers alike) is filtered by
+``allowed_repositories``. GitHub lists an installation for anyone who can access one of its
+repositories, outside collaborators included, so ``allowed_installations`` alone never grants a
+view or a setting.
+
+Account-wide numbers, the forecast and settings need ``account_access``: a personal account's own
+user, or, for an organisation, a user with admin on every repository the installation covers.
+Everyone else sees only their own repositories. The user's lists (``user_installation`` and
+``user_repository``, admin flags included) come from their last sign-in, so they can be up to one
+session (8 hours) old. The installation's repository list comes from the hourly reconciliation and
+counts only if it was stored within ``SYNC_FRESHNESS``. Anything not proven grants nothing: an
+installation never synced or not synced recently, one with no repository, a user it is not listed
+for. A foreign ID answers 404, never 403, so a page does not reveal that it exists.
 """
 
 import base64
@@ -18,12 +25,25 @@ from typing import Annotated, Any, Final
 from urllib.parse import parse_qs
 
 from fastapi import Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird.auth.config import AuthSettings
 from burnbird.auth.service import SESSION_COOKIE, session_digest
-from burnbird.models import UserInstallation, UserRepository, UserSession
+from burnbird.github.reconcile import INTERVAL as RECONCILE_INTERVAL
+from burnbird.models import (
+    Account,
+    Installation,
+    Repository,
+    UserInstallation,
+    UserRepository,
+    UserSession,
+)
+
+# An organisation's repository list counts only if a reconciliation stored it this recently: one
+# missed hourly run is allowed. Older, a repository GitHub added since may be missing, and that
+# must not grant access.
+SYNC_FRESHNESS: Final = 2 * RECONCILE_INTERVAL
 
 # The form field every POST form carries.
 CSRF_FIELD: Final = "csrf_token"
@@ -93,6 +113,51 @@ def allowed_repositories(
                 select(UserRepository.repository_id).where(UserRepository.user_id == user)
             )
         )
+
+
+def account_access(session: Session, user_id: int, installation_id: int) -> bool:
+    """Return whether the user may see the installation's account-wide numbers and settings.
+
+    One query, true only when the installation is listed for the user and either:
+    - the account is the user's own personal account (type ``User``, the user's own ID); or
+    - the account is an organisation, a reconciliation stored its full repository list within
+      ``SYNC_FRESHNESS`` (by the database's clock), it holds at least one repository, and the
+      user had admin on every one of them at their last sign-in.
+    Anything else, an unknown installation included, is False.
+    """
+    repositories = select(Repository.id).where(Repository.installation_id == Installation.id)
+    lacking_admin = repositories.where(
+        ~exists().where(
+            UserRepository.user_id == user_id,
+            UserRepository.repository_id == Repository.id,
+            UserRepository.admin.is_(True),
+        )
+    )
+    allowed = (
+        select(Installation.id)
+        .join(Account, Account.id == Installation.account_id)
+        .join(
+            UserInstallation,
+            and_(
+                UserInstallation.installation_id == Installation.id,
+                UserInstallation.user_id == user_id,
+            ),
+        )
+        .where(
+            Installation.id == installation_id,
+            or_(
+                and_(Account.type == "User", Account.id == user_id),
+                and_(
+                    Account.type == "Organization",
+                    # NULL (never synced) compares as unknown, so it never passes.
+                    Installation.repositories_synced_at >= func.now() - SYNC_FRESHNESS,
+                    repositories.exists(),
+                    ~lacking_admin.exists(),
+                ),
+            ),
+        )
+    )
+    return session.scalar(select(allowed.exists())) is True
 
 
 def installation_access(

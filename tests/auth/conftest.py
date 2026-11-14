@@ -62,15 +62,25 @@ def installation_item(installation_id: int, account_id: int, kind: str = "Organi
     }
 
 
-def repository_item(repository_id: int, *, private: bool = True) -> Body:
-    """One entry of ``GET /user/installations/{id}/repositories``."""
-    return {
+def repository_item(repository_id: int, *, private: bool = True, permissions: Any = None) -> Body:
+    """One entry of ``GET /user/installations/{id}/repositories``.
+
+    The user's ``permissions`` default to read only; pass a value to replace it, or ``...`` to
+    leave the key out.
+    """
+    item: Body = {
         "id": repository_id,
         "name": f"example-app-{repository_id}",
         "full_name": f"example-org/example-app-{repository_id}",
         "private": private,
-        "permissions": {"pull": True},
     }
+    if permissions is not ...:
+        item["permissions"] = (
+            {"admin": False, "maintain": False, "push": False, "triage": False, "pull": True}
+            if permissions is None
+            else permissions
+        )
+    return item
 
 
 class FakeGithub:

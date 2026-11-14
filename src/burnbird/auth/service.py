@@ -47,14 +47,23 @@ OAUTH_COOKIE_SECONDS: Final = 600
 
 
 @dataclass(frozen=True, slots=True)
+class ListedRepository:
+    """A repository GitHub listed for the user, under which installation, and their admin flag."""
+
+    installation_id: int
+    repository: schemas.Repository
+    # GitHub's ``permissions.admin`` for this user; anything but exactly ``true`` is False.
+    admin: bool
+
+
+@dataclass(frozen=True, slots=True)
 class SignIn:
     """What GitHub says about the person signing in: who they are and what they can access."""
 
     user_id: int
     login: str
     installations: tuple[schemas.Installation, ...]
-    # Each repository with the installation it was listed under.
-    repositories: tuple[tuple[int, schemas.Repository], ...]
+    repositories: tuple[ListedRepository, ...]
     # Installations in GitHub's list that Burnbird does not handle (an enterprise account).
     skipped: int
 
@@ -69,7 +78,8 @@ class _Installations(schemas.Payload):
 
 
 class _Repositories(schemas.Payload):
-    repositories: tuple[schemas.Repository, ...]
+    # Items stay raw here, so each one's ``permissions`` can be read strictly (see ``_admin``).
+    repositories: tuple[dict[str, Any], ...]
 
 
 def github_oauth(
@@ -107,14 +117,26 @@ async def fetch_sign_in(github: Any, token: dict[str, Any]) -> SignIn:
             except ValidationError:
                 skipped += 1
     repositories = [
-        (installation.id, repository)
+        ListedRepository(installation.id, schemas.Repository.model_validate(item), _admin(item))
         for installation in installations
         for page in await _pages(
             github, token, f"user/installations/{installation.id}/repositories"
         )
-        for repository in _Repositories.model_validate(page).repositories
+        for item in _Repositories.model_validate(page).repositories
     ]
     return SignIn(user.id, user.login, tuple(installations), tuple(repositories), skipped)
+
+
+def _admin(item: dict[str, Any]) -> bool:
+    """Return whether GitHub says the user has admin on the repository: exactly ``true`` only.
+
+    "The access the user has to each repository is included in the hash under the permissions
+    key" (https://docs.github.com/en/rest/apps/installations). A missing key, a missing object or
+    any value but the JSON boolean ``true`` gives no admin, so a malformed answer never grants
+    account-wide access.
+    """
+    permissions = item.get("permissions")
+    return isinstance(permissions, dict) and permissions.get("admin") is True
 
 
 async def _get_json(github: Any, token: dict[str, Any], path: str) -> Any:
@@ -167,8 +189,8 @@ def store_sign_in(
         )
         for installation in sign_in.installations:
             store_installation(session, installation)
-        for installation_id, repository in sign_in.repositories:
-            store_repository(session, installation_id, repository)
+        for listed in sign_in.repositories:
+            store_repository(session, listed.installation_id, listed.repository)
         session.execute(delete(UserInstallation).where(UserInstallation.user_id == user_id))
         session.execute(delete(UserRepository).where(UserRepository.user_id == user_id))
         _insert(
@@ -179,7 +201,10 @@ def store_sign_in(
         _insert(
             session,
             UserRepository,
-            [{"user_id": user_id, "repository_id": r.id} for _, r in sign_in.repositories],
+            [
+                {"user_id": user_id, "repository_id": r.repository.id, "admin": r.admin}
+                for r in sign_in.repositories
+            ],
         )
         if old_session_id is not None:
             session.execute(

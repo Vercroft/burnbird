@@ -27,8 +27,8 @@ from burnbird.auth.config import AuthSettings
 from burnbird.github import schemas
 from burnbird.github.client import API_HEADERS, API_HOST, PER_PAGE, next_link
 from burnbird.github.client import GithubAnswerError as GithubAnswerError
-from burnbird.github.events import store_installation
-from burnbird.models import GithubUser, Repository, UserInstallation, UserRepository, UserSession
+from burnbird.github.events import store_installation, store_repository
+from burnbird.models import GithubUser, UserInstallation, UserRepository, UserSession
 
 AUTHORIZE_URL: Final = "https://github.com/login/oauth/authorize"
 # Where the code is exchanged for the user access token.
@@ -168,16 +168,7 @@ def store_sign_in(
         for installation in sign_in.installations:
             store_installation(session, installation)
         for installation_id, repository in sign_in.repositories:
-            values = {
-                "installation_id": installation_id,
-                "name": repository.name,
-                "private": repository.private,
-            }
-            session.execute(
-                insert(Repository)
-                .values(id=repository.id, **values)
-                .on_conflict_do_update(index_elements=[Repository.id], set_=values)
-            )
+            store_repository(session, installation_id, repository)
         session.execute(delete(UserInstallation).where(UserInstallation.user_id == user_id))
         session.execute(delete(UserRepository).where(UserRepository.user_id == user_id))
         _insert(

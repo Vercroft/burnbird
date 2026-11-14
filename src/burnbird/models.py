@@ -1,7 +1,8 @@
 """The stored tables: accounts, installations, repositories, jobs, users, sessions and settings.
 
 Job metadata only. No token, no raw webhook body and no email address is stored; a session is kept
-as the SHA-256 of its ID, never the ID itself. GitHub's own IDs are the primary keys.
+as the SHA-256 of its ID, never the ID itself. GitHub's own IDs are the primary keys. The worker's
+periodic tasks are stored here too.
 """
 
 import uuid
@@ -87,6 +88,8 @@ class Installation(Base):
     )
     created_at: Mapped[datetime]
     suspended: Mapped[bool] = mapped_column(server_default=false())
+    # When the hourly reconciliation last stored GitHub's full repository list; None until then.
+    repositories_synced_at: Mapped[datetime | None]
 
 
 class Repository(Base):
@@ -222,3 +225,17 @@ class LabelSize(Base):
     label: Mapped[str] = mapped_column(primary_key=True)
     # The id of a larger-runner row in providers.toml.
     size: Mapped[str]
+
+
+class WorkerTask(Base):
+    """A periodic worker task: when it is next due, and when a run last finished all its work.
+
+    A worker claims a run by moving ``next_run_at`` forward in one conditional UPDATE, so two
+    workers never run the same task at once; see ``burnbird.github.schedule``.
+    """
+
+    __tablename__ = "worker_task"
+
+    name: Mapped[str] = mapped_column(primary_key=True)
+    next_run_at: Mapped[datetime]
+    last_success_at: Mapped[datetime | None]

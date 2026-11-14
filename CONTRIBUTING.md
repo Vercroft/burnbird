@@ -73,12 +73,12 @@ messages, the pull request title or its description. Its output names only the c
 | `src/burnbird/billing/classify.py` | Classifies a job: its provider, runner size and price or weight a minute |
 | `src/burnbird/billing/counting.py` | Bills a job: its minutes after the provider's rounding, its dollars or allowance units, and the day it counts on |
 | `src/burnbird/billing/forecast.py` | An allowance's cycle, use, pace and run-out date, and its warnings as data |
-| `src/burnbird/github/` | GitHub: `router.py` takes `POST /github/webhook` (signature, then the fields of a handled event, stored once); `schemas.py` names the fields kept per event; `signature.py` checks the HMAC; `events.py` is the worker's step that turns stored deliveries into jobs, installations and deletions (an uninstall, removed repositories, a revoked authorization); `client.py` is the App's own API client (the App JWT, installation tokens, paging, retries, rate limits); `config.py` reads the App's client ID and secret files |
+| `src/burnbird/github/` | GitHub: `router.py` takes `POST /github/webhook` (signature, then the fields of a handled event, stored once); `schemas.py` names the fields kept per event; `signature.py` checks the HMAC; `events.py` is the worker's step that turns stored deliveries into jobs, installations and deletions (an uninstall, removed repositories, a revoked authorization); `client.py` is the App's own API client (the App JWT, installation tokens, paging, retries, rate limits); `reconcile.py` is the hourly reconciliation of the stored installations and repositories with GitHub's lists; `schedule.py` claims a due run of a periodic task and records how it ended; `config.py` reads the App's client ID and secret files |
 | `src/burnbird/auth/` | Sign-in with GitHub: `router.py` takes `/auth/login`, `/auth/callback` and `/auth/logout`; `service.py` holds Authlib's GitHub client (state and the PKCE S256 verifier), the user's lists from GitHub and the one-transaction store; `dependencies.py` gives the signed-in user, the access filters and the CSRF check; `config.py` reads the settings |
 | `src/burnbird/logs.py` | The commands' logging: one formatter that redacts token-shaped values, `Authorization` values, OAuth secrets and the callback's code and state |
 | `src/burnbird/web.py` | Creates the web app: the body limit and each feature's router, nothing else |
-| `src/burnbird/worker.py` | One pass of the worker |
-| `src/burnbird/models.py` | The stored tables, webhook deliveries included (their validated fields only, never the body), and each user's installations and repositories from their last sign-in |
+| `src/burnbird/worker.py` | One pass of the worker: the stored deliveries, then the periodic tasks that are due, each step isolated |
+| `src/burnbird/models.py` | The stored tables, webhook deliveries included (their validated fields only, never the body), each user's installations and repositories from their last sign-in, and the worker's periodic tasks |
 | `src/burnbird/database.py` | The database URL from the environment, and an engine whose connections and statements time out |
 | `src/burnbird/migrations/` | The Alembic migrations, shipped inside the package; `[tool.alembic]` in `pyproject.toml` points at them |
 | `src/burnbird/retention.py` | What is deleted and when: jobs after 90 days, deliveries after 7, expired sessions, "Delete my data", a revoked authorization, an uninstall, and repositories removed from an installation |
@@ -131,6 +131,15 @@ One pull request:
   read only and live in its memory, never in a row, a log or an exception; calls are serial and paced, every call has
   a time limit, only a GET is retried, and a rate limit is never waited out in a call: it raises `RateLimitedError`
   and nothing more is sent in that scope until it resumes.
+- Reconciliation deletes only what GitHub's full list no longer holds: the stored IDs are read before the list is
+  fetched, every page is collected before anything is written, and a failure changes nothing. An installation is
+  uninstalled only when GitHub answers 404 for it, a repository list that differs from its `total_count` removes
+  nothing, and a listed installation is not stored while another one of its account is. The same rule holds for
+  rows that change during the fetch, installations and repositories alike: one deleted, uninstalled or moved while
+  its list was fetched is not stored again from that list. The mass-deletion guard
+  in `burnbird.github.reconcile` stays: an empty installation list uninstalls nothing; more than `max(2, 10%)` of the
+  stored installations to uninstall uninstalls none; an empty repository list while repositories are stored removes
+  none. Each logs an ERROR, and the next run tries again. Loosening it is a reviewed decision of its own.
 - Every action in a workflow is pinned by full commit SHA with its release in a comment, and the release is at least 7
   days old.
 - Python packages are pinned exactly in `pyproject.toml` and locked in `uv.lock`; uv refuses versions younger than 7

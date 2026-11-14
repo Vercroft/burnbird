@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from joserfc.jwk import RSAKey
 from sqlalchemy import Connection, Engine, make_url
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -112,3 +113,9 @@ def restore_logging() -> Iterator[None]:
     root.setLevel(level)
     for name, floor in floors.items():
         logging.getLogger(name).setLevel(floor)
+
+
+@pytest.fixture(scope="session")
+def rsa_key() -> RSAKey:
+    """One RSA key for the App, made once per run: GitHub's App keys are 2048-bit RSA."""
+    return RSAKey.generate_key(2048)

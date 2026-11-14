@@ -17,6 +17,7 @@ TABLES = {
     "user_installation",
     "user_repository",
     "webhook_delivery",
+    "worker_task",
 }
 
 

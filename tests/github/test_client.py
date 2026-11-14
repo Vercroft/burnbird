@@ -23,6 +23,7 @@ from burnbird.github.client import (
     APP,
     GithubAnswerError,
     GithubApp,
+    InstallationRefusedError,
     Quota,
     RateLimitedError,
 )
@@ -566,3 +567,22 @@ def test_an_unusable_quota_header_leaves_a_good_answer_alone(
     github.queue("GET /app/installations", httpx2.Response(200, headers=headers, json={}))
     assert get_all(app) == [{}]
     assert app.quota(APP) is None
+
+
+def test_a_token_request_answered_403_is_a_refused_installation(
+    app: GithubApp, github: FakeGithub
+) -> None:
+    github.queue(f"POST {TOKEN_PATH}", httpx2.Response(403, json={"message": "suspended"}))
+    with pytest.raises(InstallationRefusedError, match="access_tokens answered 403"):
+        get_all(app, "installation/repositories", INSTALLATION)
+    # A secondary limit on the same call stays a rate limit.
+    github.queue(f"POST {TOKEN_PATH}", httpx2.Response(403, json=SECONDARY))
+    with pytest.raises(RateLimitedError):
+        get_all(app, "installation/repositories", INSTALLATION)
+
+
+def test_an_answer_error_carries_its_status(app: GithubApp, github: FakeGithub) -> None:
+    github.queue("GET /app/installations", httpx2.Response(404))
+    with pytest.raises(GithubAnswerError) as raised:
+        get_all(app)
+    assert raised.value.status == 404

@@ -70,7 +70,15 @@ APP: Final = 0
 
 
 class GithubAnswerError(Exception):
-    """GitHub's API did not answer as documented; the message names the call, never a value."""
+    """GitHub's API did not answer as documented; the message names the call, never a value.
+
+    ``status`` is the HTTP status of the answer, when there was one.
+    """
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        """Keep the message and the answer's status."""
+        super().__init__(message)
+        self.status = status
 
 
 class RateLimitedError(GithubAnswerError):
@@ -80,6 +88,15 @@ class RateLimitedError(GithubAnswerError):
         """Name the call and the time it may resume; never a value from the answer."""
         super().__init__(f"{call} is rate limited until {resume_at.isoformat()}")
         self.resume_at = resume_at
+
+
+class InstallationRefusedError(GithubAnswerError):
+    """GitHub refused to make an installation's token (403): it is suspended, or it blocks the App.
+
+    GitHub says a suspended App's "access to the GitHub API or webhook events is blocked for that
+    account" (https://docs.github.com/en/rest/apps/apps) without naming the status code, so every
+    403 that is not a rate limit counts.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,7 +243,9 @@ class GithubApp:
         call = f"POST /{path}"
         response = self._send("POST", f"/{path}", call, APP, self._jwt())
         if not response.is_success:
-            raise GithubAnswerError(f"{call} answered {response.status_code}")
+            raise GithubAnswerError(
+                f"{call} answered {response.status_code}", response.status_code
+            )
         return response
 
     def quota(self, installation: int = APP) -> Quota | None:
@@ -263,7 +282,9 @@ class GithubApp:
                     renewed = True
                     continue
                 if response.status_code not in RETRIED_STATUSES or attempt == GET_ATTEMPTS:
-                    raise GithubAnswerError(f"{call} answered {response.status_code}")
+                    raise GithubAnswerError(
+                        f"{call} answered {response.status_code}", response.status_code
+                    )
             self._sleep(2 ** (attempt - 1))
             attempt += 1
 
@@ -346,8 +367,12 @@ class GithubApp:
         response = self._send(
             "POST", path, call, APP, self._jwt(), {"permissions": dict(TOKEN_PERMISSIONS)}
         )
+        if response.status_code == httpx2.codes.FORBIDDEN:
+            raise InstallationRefusedError(f"{call} answered 403", 403)
         if response.status_code != httpx2.codes.CREATED:
-            raise GithubAnswerError(f"{call} answered {response.status_code}")
+            raise GithubAnswerError(
+                f"{call} answered {response.status_code}", response.status_code
+            )
         try:
             answer = _TokenAnswer.model_validate(response.json())
         except ValueError:

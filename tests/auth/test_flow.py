@@ -514,3 +514,68 @@ def test_no_token_verifier_or_code_reaches_a_log_or_a_row(
         for row in session.execute(select(table)):
             stored = repr(tuple(row))
             assert not any(value in stored for value in secrets_seen), table.name
+
+
+# ---------- the user's admin flag per repository (option B) ----------
+
+
+def _admin_flags(session: Session) -> dict[int, bool]:
+    session.expire_all()
+    rows = session.execute(
+        select(UserRepository.repository_id, UserRepository.admin).where(
+            UserRepository.user_id == USER
+        )
+    )
+    return {repository_id: admin for repository_id, admin in rows}
+
+
+def test_sign_in_stores_the_users_admin_flag_from_permissions(
+    github: FakeGithub, sign_in: SignIn, session: Session
+) -> None:
+    admin = {"admin": True, "maintain": True, "push": True, "triage": True, "pull": True}
+    maintain = {"admin": False, "maintain": True, "push": True, "triage": True, "pull": True}
+    github.installations = [installation_item(INSTALLATION[ORG], ORG)]
+    github.repositories = {
+        INSTALLATION[ORG]: [
+            repository_item(5001, permissions=admin),
+            repository_item(5002, permissions=maintain),
+            repository_item(5003),
+        ]
+    }
+    assert sign_in().status_code == 303
+    assert _admin_flags(session) == {5001: True, 5002: False, 5003: False}
+
+
+@pytest.mark.parametrize(
+    "permissions",
+    [
+        pytest.param(..., id="no permissions key"),
+        pytest.param({}, id="no admin key"),
+        pytest.param({"admin": "true"}, id="admin is text"),
+        pytest.param({"admin": 1}, id="admin is a number"),
+        pytest.param({"admin": None}, id="admin is null"),
+        pytest.param([], id="permissions is a list"),
+        pytest.param("admin", id="permissions is text"),
+    ],
+)
+def test_an_admin_flag_that_is_not_exactly_true_stores_false(
+    github: FakeGithub, sign_in: SignIn, session: Session, permissions: object
+) -> None:
+    github.installations = [installation_item(INSTALLATION[ORG], ORG)]
+    github.repositories = {INSTALLATION[ORG]: [repository_item(5001, permissions=permissions)]}
+    assert sign_in().status_code == 303
+    assert _admin_flags(session) == {5001: False}
+
+
+def test_a_later_sign_in_replaces_the_admin_flag(
+    github: FakeGithub, sign_in: SignIn, session: Session
+) -> None:
+    github.installations = [installation_item(INSTALLATION[ORG], ORG)]
+    github.repositories = {
+        INSTALLATION[ORG]: [repository_item(5001, permissions={"admin": True, "pull": True})]
+    }
+    assert sign_in().status_code == 303
+    assert _admin_flags(session) == {5001: True}
+    github.repositories = {INSTALLATION[ORG]: [repository_item(5001)]}
+    assert sign_in().status_code == 303
+    assert _admin_flags(session) == {5001: False}

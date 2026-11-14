@@ -89,16 +89,7 @@ def _job_completed(session: Session, data: dict[str, Any]) -> None:
     if installation is None:
         raise UnknownInstallationError(f"installation {event.installation.id} is not stored")
     repository = event.repository
-    repository_values = {
-        "installation_id": installation.id,
-        "name": repository.name,
-        "private": repository.private,
-    }
-    session.execute(
-        insert(Repository)
-        .values(id=repository.id, **repository_values)
-        .on_conflict_do_update(index_elements=[Repository.id], set_=repository_values)
-    )
+    store_repository(session, installation.id, repository)
     rows = session.execute(
         select(LabelSize.label, LabelSize.size).where(
             LabelSize.account_id == installation.account_id
@@ -131,6 +122,25 @@ def _job_completed(session: Session, data: dict[str, Any]) -> None:
         insert(Job)
         .values(id=job.id, run_attempt=job.run_attempt, **job_values)
         .on_conflict_do_update(index_elements=[Job.id, Job.run_attempt], set_=job_values)
+    )
+
+
+def store_repository(
+    session: Session, installation_id: int, repository: schemas.Repository
+) -> None:
+    """Store a repository under its installation, or update its name, privacy and installation.
+
+    A job's delivery, a sign-in's list and the hourly reconciliation all use it.
+    """
+    values = {
+        "installation_id": installation_id,
+        "name": repository.name,
+        "private": repository.private,
+    }
+    session.execute(
+        insert(Repository)
+        .values(id=repository.id, **values)
+        .on_conflict_do_update(index_elements=[Repository.id], set_=values)
     )
 
 

@@ -25,9 +25,16 @@ def database_url() -> str:
 
 
 def make_engine(url: str) -> Engine:
-    """Create an engine whose connections and statements time out."""
+    """Create an engine whose connections and statements time out, and whose errors hide values.
+
+    With ``hide_parameters``, "SQL statement parameters will not be displayed in INFO logging nor
+    will they be formatted into the string representation of StatementError objects", so a logged
+    traceback never shows a stored value such as a private repository's name (SQLAlchemy 2.1,
+    ``create_engine`` parameters).
+    """
     return create_engine(
         url,
+        hide_parameters=True,
         connect_args={
             "connect_timeout": CONNECT_TIMEOUT_SECONDS,
             "options": f"-c statement_timeout={STATEMENT_TIMEOUT_MILLISECONDS}",

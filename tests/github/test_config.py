@@ -79,6 +79,7 @@ def test_the_apps_private_key_is_read_from_its_file(
         pytest.param(lambda key: key.as_pem(private=False), id="public key only"),
         pytest.param(lambda key: ECKey.generate_key().as_pem(private=True), id="not RSA"),
         pytest.param(lambda key: b"not a key " + secrets.token_hex(16).encode(), id="not a key"),
+        pytest.param(lambda key: b"", id="empty"),
     ],
 )
 def test_a_file_that_is_not_an_rsa_private_key_is_refused_without_its_contents(
@@ -119,3 +120,11 @@ def test_the_settings_never_show_the_key(
     settings = app_settings()
     assert settings.client_id == "Iv23.example"
     assert repr(settings) == "AppSettings(client_id='Iv23.example')"
+
+
+def test_a_key_file_that_does_not_exist_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(PRIVATE_KEY_FILE_VARIABLE, str(tmp_path / "absent.pem"))
+    with pytest.raises(ConfigError, match="cannot read"):
+        app_private_key()

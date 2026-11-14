@@ -21,7 +21,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import Any, Final, override
-from urllib.parse import urlsplit
 
 import httpx2
 from joserfc import jwt
@@ -106,13 +105,14 @@ class _TokenAnswer(BaseModel):
 def next_link(response: httpx2.Response, call: str) -> str | None:
     """Return the ``Link: rel="next"`` URL, refusing one that leaves api.github.com.
 
-    The whole authority is compared, so no port or user part can send a token elsewhere.
+    The raw text must start with the https origin of ``API_HOST`` and a slash, so no port, user
+    part, other host or characters a URL parser drops (a tab or a newline inside the host) can
+    send a token elsewhere.
     """
     url = response.links.get("next", {}).get("url")
     if url is None:
         return None
-    link = urlsplit(url)
-    if link.scheme != "https" or link.netloc != API_HOST:
+    if not url.startswith(f"https://{API_HOST}/"):
         raise GithubAnswerError(f"{call} linked off {API_HOST}")
     return url
 
@@ -129,14 +129,30 @@ def rate_limit_resume(response: httpx2.Response, now: datetime) -> datetime | No
         return None
     retry_after = response.headers.get("retry-after", "")
     if retry_after.isdecimal():
-        return now + timedelta(seconds=int(retry_after))
-    reset = response.headers.get("x-ratelimit-reset", "")
-    if response.headers.get("x-ratelimit-remaining") == "0" and reset.isdecimal():
+        try:
+            return now + timedelta(seconds=int(retry_after))
+        except OverflowError:
+            # A wait too large for a date is no wait GitHub documents: the one-minute rule holds.
+            return now + SECONDARY_WAIT
+    reset = _epoch(response.headers.get("x-ratelimit-reset", ""), offset=1)
+    if response.headers.get("x-ratelimit-remaining") == "0" and reset is not None:
         # One second past the reset, as octokit does, so the call lands after it.
-        return max(datetime.fromtimestamp(int(reset) + 1, UTC), now)
+        return max(reset, now)
     if response.status_code == httpx2.codes.TOO_MANY_REQUESTS or _SECONDARY.search(response.text):
         return now + SECONDARY_WAIT
+    if response.headers.get("x-ratelimit-remaining") == "0":
+        return now + SECONDARY_WAIT
     return None
+
+
+def _epoch(value: str, offset: int = 0) -> datetime | None:
+    """Return the UTC time of Unix seconds in a header, or None when it is not a usable time."""
+    if not value.isdecimal():
+        return None
+    try:
+        return datetime.fromtimestamp(int(value) + offset, UTC)
+    except OverflowError, OSError, ValueError:
+        return None
 
 
 class GithubApp:
@@ -218,11 +234,18 @@ class GithubApp:
         return self._quotas.get(installation)
 
     def _get(self, url: str, call: str, installation: int) -> httpx2.Response:
+        """GET with bounded retries; a renewed token after a 401 is not counted as an attempt.
+
+        The authorization is made outside the retry, so a failed token request (a POST) is never
+        sent again here, and a paused scope makes no token.
+        """
         attempt = 1
         renewed = False
         while True:
+            self._check_paused(installation, call)
+            authorization = self._auth(installation)
             try:
-                response = self._send("GET", url, call, installation, self._auth(installation))
+                response = self._send("GET", url, call, installation, authorization)
             except httpx2.TransportError as err:
                 if attempt == GET_ATTEMPTS:
                     raise GithubAnswerError(f"{call} failed: {type(err).__name__}") from None
@@ -253,20 +276,31 @@ class GithubApp:
         authorization: str,
         body: Mapping[str, Any] | None = None,
     ) -> httpx2.Response:
-        """Send one call in ``scope``, unless the scope is paused; pause it on a rate limit."""
-        paused = self._paused.get(scope)
-        if paused is not None and self._clock() < paused:
-            raise RateLimitedError(call, paused)
+        """Send one call in ``scope``, unless the scope is paused; pause it on a rate limit.
+
+        A GET's network error is left to ``_get``, which retries it; a POST's ends the call.
+        """
+        self._check_paused(scope, call)
         self._pace(method)
-        response = self._http.request(
-            method, url, headers={"Authorization": f"Bearer {authorization}"}, json=body
-        )
+        try:
+            response = self._http.request(
+                method, url, headers={"Authorization": f"Bearer {authorization}"}, json=body
+            )
+        except httpx2.TransportError as err:
+            if method == "GET":
+                raise
+            raise GithubAnswerError(f"{call} failed: {type(err).__name__}") from None
         self._record_quota(scope, response)
         resume_at = rate_limit_resume(response, self._clock())
         if resume_at is not None:
             self._paused[scope] = resume_at
             raise RateLimitedError(call, resume_at)
         return response
+
+    def _check_paused(self, scope: int, call: str) -> None:
+        paused = self._paused.get(scope)
+        if paused is not None and self._clock() < paused:
+            raise RateLimitedError(call, paused)
 
     def _pace(self, method: str) -> None:
         now = self._monotonic()
@@ -286,9 +320,9 @@ class GithubApp:
             response.headers.get(f"x-ratelimit-{name}", "")
             for name in ("remaining", "limit", "reset")
         ]
-        if all(value.isdecimal() for value in values):
-            remaining, limit, reset = (int(value) for value in values)
-            self._quotas[scope] = Quota(remaining, limit, datetime.fromtimestamp(reset, UTC))
+        reset_at = _epoch(values[2])
+        if values[0].isdecimal() and values[1].isdecimal() and reset_at is not None:
+            self._quotas[scope] = Quota(int(values[0]), int(values[1]), reset_at)
 
     def _auth(self, installation: int) -> str:
         return self._jwt() if installation == APP else self._token(installation)

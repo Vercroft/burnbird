@@ -423,6 +423,9 @@ def test_more_pages_than_the_cap_fail(
         ("https", f"!@{API_HOST}"),
         ("http", API_HOST),
         ("https", f"{API_HOST}.example.test"),
+        # A URL parser drops a tab, so the host would read as api.github.com.
+        ("https", "api.git\thub.com"),
+        ("https", f"{API_HOST}\\@example.test"),
     ],
 )
 def test_a_next_link_off_the_api_host_fails_closed(
@@ -499,3 +502,67 @@ def test_no_token_or_jwt_reaches_a_log_an_error_or_a_repr(
     assert len(errors) == 2
     for secret in secrets_sent:
         assert secret not in shown
+
+
+def test_a_token_request_that_times_out_is_sent_once(app: GithubApp, github: FakeGithub) -> None:
+    github.queue(f"POST {TOKEN_PATH}", httpx2.ConnectTimeout("timed out"))
+    with pytest.raises(GithubAnswerError, match=r"POST .*access_tokens failed: ConnectTimeout"):
+        get_all(app, "installation/repositories", INSTALLATION)
+    assert len(github.calls(f"POST {TOKEN_PATH}")) == 1
+    assert github.calls("GET /installation/repositories") == []
+
+
+def test_a_post_that_times_out_is_sent_once(app: GithubApp, github: FakeGithub) -> None:
+    github.queue("POST /app/hook/deliveries/9/attempts", httpx2.ReadTimeout("timed out"))
+    with pytest.raises(GithubAnswerError, match="failed: ReadTimeout"):
+        app.post("app/hook/deliveries/9/attempts")
+    assert len(github.requests) == 1
+
+
+def test_a_paused_installation_makes_no_token(
+    app: GithubApp, github: FakeGithub, clock: FakeClock
+) -> None:
+    github.queue(
+        "GET /installation/repositories", httpx2.Response(429, headers={"retry-after": "7200"})
+    )
+    with pytest.raises(RateLimitedError):
+        get_all(app, "installation/repositories", INSTALLATION)
+    # The token minted at START has expired, and the installation is paused for another 30 minutes.
+    clock.now = START + timedelta(minutes=90)
+    with pytest.raises(RateLimitedError):
+        get_all(app, "installation/repositories", INSTALLATION)
+    assert len(github.tokens) == 1
+    assert len(github.requests) == 2
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        pytest.param({"retry-after": "9" * 30}, id="retry-after too large"),
+        pytest.param(
+            {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "9" * 30}, id="reset too large"
+        ),
+        pytest.param({"x-ratelimit-remaining": "0"}, id="no reset"),
+    ],
+)
+def test_a_limit_with_an_unusable_time_waits_the_documented_minute(
+    app: GithubApp, github: FakeGithub, headers: dict[str, str]
+) -> None:
+    github.queue("GET /app/installations", httpx2.Response(403, headers=headers))
+    with pytest.raises(RateLimitedError) as raised:
+        get_all(app)
+    assert raised.value.resume_at == START + timedelta(seconds=60)
+
+
+@pytest.mark.parametrize("reset", ["9" * 30, "not a time", ""])
+def test_an_unusable_quota_header_leaves_a_good_answer_alone(
+    app: GithubApp, github: FakeGithub, reset: str
+) -> None:
+    headers = {
+        "x-ratelimit-remaining": "10",
+        "x-ratelimit-limit": "5000",
+        "x-ratelimit-reset": reset,
+    }
+    github.queue("GET /app/installations", httpx2.Response(200, headers=headers, json={}))
+    assert get_all(app) == [{}]
+    assert app.quota(APP) is None

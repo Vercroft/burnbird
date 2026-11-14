@@ -28,13 +28,23 @@ Set up once: install [uv](https://docs.astral.sh/uv/), which installs the Python
 row is what CI runs, in the job named in the last column.
 
 The storage tests need a throwaway Postgres, named in `BURNBIRD_TEST_DATABASE_URL`; without it they fail, never skip.
-Start one with Docker, from the image the CI job pins (it is written only there), and stop it when you are done:
+Start one with Docker, from the image the CI job pins (it is written only there), and stop it when you are done.
+On Docker Engine on Linux, run it on the host network, listening on loopback only: the tests then reach Postgres over
+loopback, so a VPN or firewall that blocks traffic to container addresses does not stop them.
+
+```sh
+docker run --rm -d --name burnbird-test-postgres --network host -e POSTGRES_HOST_AUTH_METHOD=trust \
+  -e POSTGRES_DB=burnbird_test "$(grep -oE 'postgres:[^ ]+@sha256:[0-9a-f]{64}' .github/workflows/ci.yml)" \
+  -c listen_addresses=127.0.0.1 -c port=55432
+export BURNBIRD_TEST_DATABASE_URL=postgresql+psycopg://postgres@127.0.0.1:55432/burnbird_test
+docker stop burnbird-test-postgres
+```
+
+On Docker Desktop, publish the port instead:
 
 ```sh
 docker run --rm -d --name burnbird-test-postgres -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=burnbird_test \
   -p 127.0.0.1:55432:5432 "$(grep -oE 'postgres:[^ ]+@sha256:[0-9a-f]{64}' .github/workflows/ci.yml)"
-export BURNBIRD_TEST_DATABASE_URL=postgresql+psycopg://postgres@127.0.0.1:55432/burnbird_test
-docker stop burnbird-test-postgres
 ```
 
 | To | Run | CI job |

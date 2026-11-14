@@ -14,10 +14,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird import logs
 from burnbird.auth.config import AuthSettings
+from burnbird.auth.dependencies import AuthState
 from burnbird.auth.service import MAX_PAGES, OAUTH_COOKIE, OAUTH_COOKIE_SECONDS, SESSION_COOKIE
 from burnbird.models import (
     Account,
@@ -29,6 +30,7 @@ from burnbird.models import (
     UserRepository,
     UserSession,
 )
+from burnbird.web import create_app
 from tests.auth.conftest import (
     INSTALLATION,
     ORG,
@@ -42,6 +44,11 @@ from tests.auth.conftest import (
 )
 
 type SignIn = Callable[[], httpx2.Response]
+
+UNFINISHED_LOGINS = 20
+BROWSER_COOKIE_LIMIT = 4096
+# Authlib keeps each login's state under this key in the OAuth cookie.
+STATE_KEY_PREFIX = "_state_github_"
 
 
 def _lists(session: Session) -> tuple[set[int], set[int]]:
@@ -238,13 +245,55 @@ def test_a_tampered_oauth_cookie_is_refused(
     _refused_without_exchange(response, github, session)
 
 
+def _unfinished_logins(client: TestClient, github: FakeGithub) -> list[tuple[str, str]]:
+    """Start sign-in again and again without a callback; return each login's code and state.
+
+    Every login keeps only its own state, so the OAuth cookie stays under the browser's 4096-byte
+    limit for one cookie (RFC 6265 section 6.1); a cookie over it is dropped, and every sign-in
+    after that would fail. Authlib issue 622.
+    """
+    started = []
+    for _ in range(UNFINISHED_LOGINS):
+        login = client.get("/auth/login")
+        [cookie] = [
+            header.split(";", 1)[0]
+            for header in login.headers.get_list("set-cookie")
+            if header.startswith(f"{OAUTH_COOKIE}=")
+        ]
+        assert len(cookie.encode()) < BROWSER_COOKIE_LIMIT
+        assert [key for key in oauth_data(client) if key.startswith(STATE_KEY_PREFIX)] == [
+            f"{STATE_KEY_PREFIX}{parse_qs(urlsplit(login.headers['location']).query)['state'][0]}"
+        ]
+        started.append(github.authorize(login.headers["location"]))
+    return started
+
+
+def test_many_unfinished_logins_keep_the_cookie_small_and_the_last_one_signs_in(
+    client: TestClient, github: FakeGithub, session: Session
+) -> None:
+    *_, (code, state) = _unfinished_logins(client, github)
+    response = client.get("/auth/callback", params={"code": code, "state": state})
+    assert response.status_code == 303
+    assert len(_sessions(session)) == 1
+
+
 def test_the_state_of_an_earlier_login_is_refused(
     client: TestClient, github: FakeGithub, session: Session
 ) -> None:
-    code, state = github.authorize(client.get("/auth/login").headers["location"])
-    client.get("/auth/login")
+    (code, state), *_ = _unfinished_logins(client, github)
     response = client.get("/auth/callback", params={"code": code, "state": state})
     _refused_without_exchange(response, github, session)
+
+
+def test_the_github_client_has_no_cache(
+    sessions: sessionmaker[Session], auth_settings: AuthSettings
+) -> None:
+    # With a cache, Authlib keeps the state there and only a marker in the cookie; the state
+    # advisories CVE-2025-68158 and CVE-2026-41425 need one. Without it, the state lives only in
+    # the signed cookie of the browser that started the sign-in.
+    state = create_app(secrets.token_bytes(32), sessions, auth_settings).state.auth
+    assert isinstance(state, AuthState)
+    assert state.github.framework.cache is None
 
 
 def test_an_oauth_cookie_older_than_its_limit_is_refused(

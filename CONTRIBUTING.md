@@ -119,10 +119,10 @@ One pull request:
 - `request.session` holds only Authlib's OAuth state, in the signed `__Host-burnbird_oauth` cookie: no code reads or
   writes it except Authlib and the callback, which clears it. The sign-in session is the `__Host-burnbird_session`
   cookie and the `session` table, which stores only its SHA-256.
-- Access: anything that names a repository, workflow, runner or label is filtered by `allowed_repositories`;
-  installation-wide totals and the forecast (numbers only, no names) need `allowed_installations`. GitHub lists an
-  installation for a user who can access any one of its repositories, so the installation filter alone would show
-  names a user cannot see. A foreign ID answers 404.
+- Access: everything a page shows (names and numbers alike) is filtered by `allowed_repositories`. GitHub lists an
+  installation for anyone who can access one of its repositories, outside collaborators included, so
+  `allowed_installations` alone never grants a view or a setting. Account-wide numbers, the forecast and settings wait
+  for the account-wide access rule, which is decided before the dashboard is built. A foreign ID answers 404.
 - Every POST depends on `csrf_protected`: the `Origin` must be the site's origin exactly, and the form's `csrf_token`
   must be the session's (`csrf_token(request)`).
 - No user access token is stored or logged; a sign-in uses it within its one request.

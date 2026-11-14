@@ -1,9 +1,11 @@
 """Who is signed in, what they may see, and the CSRF check every POST runs.
 
-Two filters, one rule. GitHub lists an installation for a user who can access any one of its
-repositories, so anything that names a repository, workflow, runner or label is filtered by
-``allowed_repositories``; installation-wide numbers without names use ``allowed_installations``.
-A foreign ID answers 404, never 403, so a page does not reveal that it exists.
+Everything a page shows (names and numbers alike) is filtered by ``allowed_repositories``. GitHub
+lists an installation for anyone who can access one of its repositories, outside collaborators
+included, so ``allowed_installations`` alone never grants a view or a setting. Account-wide
+numbers, the forecast and settings wait for the account-wide access rule, which is decided before
+the dashboard is built. A foreign ID answers 404, never 403, so a page does not reveal that it
+exists.
 """
 
 import base64

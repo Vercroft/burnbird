@@ -84,7 +84,15 @@ def process_pending(sessions: sessionmaker[Session], now: datetime, limit: int) 
 
 
 def _job_completed(session: Session, data: dict[str, Any]) -> None:
-    event = schemas.WorkflowJobCompleted.model_validate(data)
+    store_job(session, schemas.WorkflowJobCompleted.model_validate(data))
+
+
+def store_job(session: Session, event: schemas.WorkflowJobCompleted) -> None:
+    """Store one completed job attempt, classified and billed, and its repository.
+
+    The webhook's ``workflow_job.completed`` and the backfill both use it, so a job is stored the
+    same way whichever path brings it.
+    """
     installation = session.get(Installation, event.installation.id)
     if installation is None:
         raise UnknownInstallationError(f"installation {event.installation.id} is not stored")

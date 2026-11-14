@@ -248,6 +248,10 @@ class GithubApp:
             )
         return response
 
+    def now(self) -> datetime:
+        """Return the client's time of day, the clock its rate limits are measured by."""
+        return self._clock()
+
     def quota(self, installation: int = APP) -> Quota | None:
         """Return the primary rate limit of a scope from its last answer; None before any."""
         return self._quotas.get(installation)

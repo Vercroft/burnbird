@@ -10,11 +10,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Final, cast
 
-from sqlalchemy import CursorResult, Delete, Select, delete, select
+from sqlalchemy import CursorResult, Delete, Select, delete, func, select, update
 from sqlalchemy.orm import Session
 
 from burnbird.models import (
     Account,
+    Backfill,
     GithubUser,
     Installation,
     Job,
@@ -35,6 +36,7 @@ class Deleted:
     """How many rows of each table one deletion removed."""
 
     jobs: int = 0
+    backfills: int = 0
     repositories: int = 0
     label_sizes: int = 0
     user_installations: int = 0
@@ -65,15 +67,31 @@ def purge_sessions(session: Session, now: datetime) -> int:
 def delete_my_data(session: Session, user_id: int) -> Deleted:
     """Delete a user, their sessions and access lists, and their personal account's jobs.
 
-    The personal account is the account with the user's own ID and type ``User``. Organisation
-    data stays: it belongs to the organisation and goes when the App is uninstalled.
+    The personal account is the account with the user's own ID and type ``User``. Its repository
+    rows are locked first, in the order a backfill locks them (repository, then its queued row), so
+    a backfill run in progress finishes before the jobs go, and none comes back after: the
+    repositories leave the backfill queue and are marked backfilled, so no reconciliation queues
+    them again. Jobs that webhooks bring later are new jobs, collected while the App stays
+    installed. Organisation data stays: it belongs to the organisation and goes when the App is
+    uninstalled.
     """
     personal = (
         select(Installation.id).join(Account).where(Account.id == user_id, Account.type == "User")
     )
+    repositories = _repositories(personal)
+    # Repository rows first, as a backfill run takes them, so the two never wait on each other in
+    # opposite orders.
+    session.execute(
+        select(Repository.id).where(Repository.id.in_(repositories)).with_for_update()
+    ).all()
+    backfills = _count(session, delete(Backfill).where(Backfill.repository_id.in_(repositories)))
+    session.execute(
+        update(Repository).where(Repository.id.in_(repositories)).values(backfilled_at=func.now())
+    )
     # Keyword arguments run in order, so children go before their parents.
     return Deleted(
-        jobs=_count(session, delete(Job).where(Job.repository_id.in_(_repositories(personal)))),
+        backfills=backfills,
+        jobs=_count(session, delete(Job).where(Job.repository_id.in_(repositories))),
         **_user_rows(session, user_id),
     )
 

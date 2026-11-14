@@ -8,6 +8,7 @@ from burnbird.models import Base
 
 TABLES = {
     "account",
+    "backfill",
     "github_user",
     "installation",
     "job",

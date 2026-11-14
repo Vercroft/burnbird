@@ -5,6 +5,8 @@ moves from all repositories to selected ones, ``repositories_removed`` "is empty
 (https://docs.github.com/en/webhooks/webhook-events-and-payloads#installation_repositories). So
 every hour the App's installations (``GET /app/installations``) and each installation's
 repositories (``GET /installation/repositories``) are listed in full, and the stored rows follow.
+Then every repository never backfilled, however it was first stored, is queued for a backfill of
+its jobs since the cycle start (``burnbird.github.backfill``).
 
 These rules keep a deletion safe:
 - **Snapshot first.** The stored IDs are read before GitHub is asked, and only those can be
@@ -42,7 +44,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird import retention
-from burnbird.github import schedule, schemas
+from burnbird.github import backfill, schedule, schemas
 from burnbird.github.client import (
     GithubAnswerError,
     GithubApp,
@@ -125,6 +127,13 @@ def reconcile(
             # One installation's failure never stops the others; nothing of it was written.
             logger.exception("reconcile: installation %d failed; skipped", installation.id)
             complete = False
+    try:
+        with sessions.begin() as session:
+            queued = backfill.queue(session)
+        logger.info("reconcile: %d repositories queued for backfill", queued)
+    except Exception:
+        logger.exception("reconcile: queueing the backfill failed")
+        complete = False
     return complete, resume_at
 
 

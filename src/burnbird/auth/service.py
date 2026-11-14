@@ -12,7 +12,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Final
-from urllib.parse import urlsplit
 
 import httpx2
 
@@ -26,23 +25,17 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird.auth.config import AuthSettings
 from burnbird.github import schemas
+from burnbird.github.client import API_HEADERS, API_HOST, PER_PAGE, next_link
+from burnbird.github.client import GithubAnswerError as GithubAnswerError
 from burnbird.github.events import store_installation
 from burnbird.models import GithubUser, Repository, UserInstallation, UserRepository, UserSession
 
 AUTHORIZE_URL: Final = "https://github.com/login/oauth/authorize"
 # Where the code is exchanged for the user access token.
 EXCHANGE_URL: Final = "https://github.com/login/oauth/access_token"
-API_HOST: Final = "api.github.com"
-# The REST API version every call asks for:
-# https://docs.github.com/en/rest/about-the-rest-api/api-versions
-API_HEADERS: Final = {
-    "Accept": "application/vnd.github+json",
-    "X-GitHub-Api-Version": "2026-03-10",
-}
 # Every GitHub call has a time limit; none is retried here (the code is single use, and a failed
 # sign-in is simply started again).
 TIMEOUT_SECONDS: Final = 10.0
-PER_PAGE: Final = 100
 # More pages than this means something is wrong: the sign-in fails rather than stores a part.
 MAX_PAGES: Final = 50
 
@@ -51,10 +44,6 @@ SESSION_LIFETIME: Final = timedelta(hours=8)
 OAUTH_COOKIE: Final = "__Host-burnbird_oauth"
 # GitHub's code lives 10 minutes, so the state and verifier need no longer.
 OAUTH_COOKIE_SECONDS: Final = 600
-
-
-class GithubAnswerError(Exception):
-    """GitHub's API did not answer as documented; the message names the call, never a value."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +118,7 @@ async def fetch_sign_in(github: Any, token: dict[str, Any]) -> SignIn:
 
 
 async def _get_json(github: Any, token: dict[str, Any], path: str) -> Any:
-    response: httpx2.Response = await github.get(path, token=token, headers=API_HEADERS)
+    response: httpx2.Response = await github.get(path, token=token, headers=dict(API_HEADERS))
     if response.status_code != httpx2.codes.OK:
         raise GithubAnswerError(f"GET {path} answered {response.status_code}")
     return response.json()
@@ -143,16 +132,11 @@ async def _pages(github: Any, token: dict[str, Any], path: str) -> list[Any]:
     while url is not None:
         if len(pages) == MAX_PAGES:
             raise GithubAnswerError(f"GET {path} has more than {MAX_PAGES} pages")
-        response: httpx2.Response = await github.get(url, token=token, headers=API_HEADERS)
+        response: httpx2.Response = await github.get(url, token=token, headers=dict(API_HEADERS))
         if response.status_code != httpx2.codes.OK:
             raise GithubAnswerError(f"GET {path} answered {response.status_code}")
         pages.append(response.json())
-        url = response.links.get("next", {}).get("url")
-        if url is not None:
-            link = urlsplit(url)
-            # The whole authority, so no port or user part can send the token elsewhere.
-            if link.scheme != "https" or link.netloc != API_HOST:
-                raise GithubAnswerError(f"GET {path} linked off {API_HOST}")
+        url = next_link(response, f"GET {path}")
     return pages
 
 

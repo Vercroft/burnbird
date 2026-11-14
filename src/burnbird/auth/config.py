@@ -9,9 +9,9 @@ from dataclasses import dataclass, field
 from typing import Final
 from urllib.parse import urlsplit
 
-from burnbird.github.config import ConfigError, read_secret_file
+from burnbird.github.config import CLIENT_ID_VARIABLE as CLIENT_ID_VARIABLE
+from burnbird.github.config import ConfigError, client_id, read_secret_file
 
-CLIENT_ID_VARIABLE: Final = "BURNBIRD_GITHUB_CLIENT_ID"
 # The variable that names the file holding the App's client secret.
 CLIENT_FILE_VARIABLE: Final = "BURNBIRD_GITHUB_CLIENT_SECRET_FILE"
 STATE_KEY_FILE_VARIABLE: Final = "BURNBIRD_OAUTH_STATE_KEY_FILE"
@@ -65,12 +65,10 @@ def site_origin(url: str) -> str:
 
 def settings_from_environment() -> AuthSettings:
     """Read the sign-in settings; ``ConfigError`` names the setting, never its value."""
-    client_id = os.environ.get(CLIENT_ID_VARIABLE)
-    if not client_id:
-        raise ConfigError(f"set {CLIENT_ID_VARIABLE} to the GitHub App's client ID")
+    app_client_id = client_id()
     origin = site_origin(os.environ.get(BASE_URL_VARIABLE, ""))
     return AuthSettings(
-        client_id=client_id,
+        client_id=app_client_id,
         client_secret=_text(CLIENT_FILE_VARIABLE),
         state_key=state_key(_text(STATE_KEY_FILE_VARIABLE)),
         origin=origin,

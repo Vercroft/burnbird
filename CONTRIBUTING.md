@@ -73,7 +73,7 @@ messages, the pull request title or its description. Its output names only the c
 | `src/burnbird/billing/classify.py` | Classifies a job: its provider, runner size and price or weight a minute |
 | `src/burnbird/billing/counting.py` | Bills a job: its minutes after the provider's rounding, its dollars or allowance units, and the day it counts on |
 | `src/burnbird/billing/forecast.py` | An allowance's cycle, use, pace and run-out date, and its warnings as data |
-| `src/burnbird/github/` | GitHub: `router.py` takes `POST /github/webhook` (signature, then the fields of a handled event, stored once); `schemas.py` names the fields kept per event; `signature.py` checks the HMAC; `events.py` is the worker's step that turns stored deliveries into jobs, installations and deletions (an uninstall, removed repositories, a revoked authorization); `config.py` reads the secret files |
+| `src/burnbird/github/` | GitHub: `router.py` takes `POST /github/webhook` (signature, then the fields of a handled event, stored once); `schemas.py` names the fields kept per event; `signature.py` checks the HMAC; `events.py` is the worker's step that turns stored deliveries into jobs, installations and deletions (an uninstall, removed repositories, a revoked authorization); `client.py` is the App's own API client (the App JWT, installation tokens, paging, retries, rate limits); `config.py` reads the App's client ID and secret files |
 | `src/burnbird/auth/` | Sign-in with GitHub: `router.py` takes `/auth/login`, `/auth/callback` and `/auth/logout`; `service.py` holds Authlib's GitHub client (state and the PKCE S256 verifier), the user's lists from GitHub and the one-transaction store; `dependencies.py` gives the signed-in user, the access filters and the CSRF check; `config.py` reads the settings |
 | `src/burnbird/logs.py` | The commands' logging: one formatter that redacts token-shaped values, `Authorization` values, OAuth secrets and the callback's code and state |
 | `src/burnbird/web.py` | Creates the web app: the body limit and each feature's router, nothing else |
@@ -110,9 +110,10 @@ One pull request:
 
 - Secrets never go in git.
 - Secrets are read only from files named in the environment: the webhook secret (`BURNBIRD_WEBHOOK_SECRET_FILE`), the
-  App's client secret (`BURNBIRD_GITHUB_CLIENT_SECRET_FILE`) and the OAuth state key (`BURNBIRD_OAUTH_STATE_KEY_FILE`,
-  32 characters or more). The client ID (`BURNBIRD_GITHUB_CLIENT_ID`) and the site's origin (`BURNBIRD_BASE_URL`,
-  `https://<host>` with no path) come from the environment. Tests make random values.
+  App's client secret (`BURNBIRD_GITHUB_CLIENT_SECRET_FILE`), the OAuth state key (`BURNBIRD_OAUTH_STATE_KEY_FILE`,
+  32 characters or more) and the App's RSA private key in PEM (`BURNBIRD_GITHUB_APP_PRIVATE_KEY_FILE`). The client ID
+  (`BURNBIRD_GITHUB_CLIENT_ID`, also the App JWT's issuer) and the site's origin (`BURNBIRD_BASE_URL`,
+  `https://<host>` with no path) come from the environment. Tests make random values and keys.
 - Endpoints are plain `def`; `async def` only for a dependency that awaits the request body and makes no blocking call,
   and for `/auth/login` and `/auth/callback`, because Authlib's client is async; the callback's database work runs in
   the thread pool.
@@ -126,6 +127,10 @@ One pull request:
 - Every POST depends on `csrf_protected`: the `Origin` must be the site's origin exactly, and the form's `csrf_token`
   must be the session's (`csrf_token(request)`).
 - No user access token is stored or logged; a sign-in uses it within its one request.
+- The App's own calls go through `burnbird.github.client.GithubApp`: installation tokens ask for Actions and Metadata
+  read only and live in its memory, never in a row, a log or an exception; calls are serial and paced, every call has
+  a time limit, only a GET is retried, and a rate limit is never waited out in a call: it raises `RateLimitedError`
+  and nothing more is sent in that scope until it resumes.
 - Every action in a workflow is pinned by full commit SHA with its release in a comment, and the release is at least 7
   days old.
 - Python packages are pinned exactly in `pyproject.toml` and locked in `uv.lock`; uv refuses versions younger than 7

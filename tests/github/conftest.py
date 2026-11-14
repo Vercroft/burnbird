@@ -1,4 +1,4 @@
-"""The webhook app on the rolled-back test connection, a random secret, and invented payloads.
+"""The webhook app on the rolled-back connection, a random secret, invented payloads, an App key.
 
 The payloads are invented data shaped like GitHub's documented examples, with a few of the fields
 Burnbird ignores, so the tests show those are dropped. No real account, repository or runner.
@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from httpx2 import Response
+from joserfc.jwk import RSAKey
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird.auth.config import AuthSettings
@@ -202,3 +203,9 @@ def repositories_removed() -> Callable[..., Body]:
 @pytest.fixture
 def signer() -> Callable[[bytes, bytes], str]:
     return sign
+
+
+@pytest.fixture(scope="session")
+def rsa_key() -> RSAKey:
+    """One RSA key for the App, made once per run: GitHub's App keys are 2048-bit RSA."""
+    return RSAKey.generate_key(2048)

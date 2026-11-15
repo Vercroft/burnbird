@@ -64,26 +64,52 @@ def purge_sessions(session: Session, now: datetime) -> int:
     return _count(session, delete(UserSession).where(UserSession.expires_at <= _aware(now)))
 
 
+def lock_repositories(
+    session: Session, repository_ids: Collection[int] | Select[int], *, key_share: bool
+) -> None:
+    """Lock the stored repositories with these IDs in ID order, until the transaction ends.
+
+    The rule: every code path that locks more than one repository goes through this function,
+    so they all take the locks in one order and none waits on another in the opposite order (a
+    deadlock). Without the ORDER BY the order would be whatever the query plan yields. The locks
+    are FOR UPDATE, or FOR KEY SHARE when ``key_share`` is true; both conflict with FOR UPDATE.
+    """
+    session.execute(
+        select(Repository.id)
+        .where(Repository.id.in_(repository_ids))
+        .order_by(Repository.id)
+        .with_for_update(read=key_share, key_share=key_share)
+    ).all()
+
+
 def delete_my_data(session: Session, user_id: int) -> Deleted:
     """Delete a user, their sessions and access lists, and their personal account's jobs.
 
     The personal account is the account with the user's own ID and type ``User``. Its repository
-    rows are locked first, in the order a backfill locks them (repository, then its queued row), so
-    a backfill run in progress finishes before the jobs go, and none comes back after: the
-    repositories leave the backfill queue and are marked backfilled, so no reconciliation queues
-    them again. Jobs that webhooks bring later are new jobs, collected while the App stays
-    installed. Organisation data stays: it belongs to the organisation and goes when the App is
-    uninstalled.
+    rows are locked first, in ID order as a re-queue locks them, and before the queued row or the
+    account, as a backfill and ``store_job`` lock them, so a run in progress finishes before the
+    jobs go. The
+    repositories leave the backfill queue and are marked backfilled, so the reconciliation does
+    not queue them again; a lost event or a gap may re-queue them later. Then the account's
+    ``data_deleted_at`` is set, so no path (a webhook, a redelivery or a backfill) stores a job
+    created before it again, and no backfill starts before it. Jobs created later are new jobs,
+    collected while the App stays installed. Organisation data stays: it belongs to the
+    organisation and goes when the App is uninstalled.
     """
     personal = (
         select(Installation.id).join(Account).where(Account.id == user_id, Account.type == "User")
     )
     repositories = _repositories(personal)
-    # Repository rows first, as a backfill run takes them, so the two never wait on each other in
-    # opposite orders.
+    # Repository rows first, as a backfill run takes them, and in ID order, as a re-queue takes
+    # them.
+    lock_repositories(session, repositories, key_share=False)
+    # Then the account (the order store_job takes them): from now on no job created before this
+    # moment is stored again, by any path.
     session.execute(
-        select(Repository.id).where(Repository.id.in_(repositories)).with_for_update()
-    ).all()
+        update(Account)
+        .where(Account.id == user_id, Account.type == "User")
+        .values(data_deleted_at=func.now())
+    )
     backfills = _count(session, delete(Backfill).where(Backfill.repository_id.in_(repositories)))
     session.execute(
         update(Repository).where(Repository.id.in_(repositories)).values(backfilled_at=func.now())

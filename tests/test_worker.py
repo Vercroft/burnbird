@@ -10,7 +10,7 @@ from sqlalchemy import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird import worker
-from burnbird.github import backfill, events, reconcile
+from burnbird.github import backfill, events, reconcile, redeliver
 from burnbird.github.client import GithubApp
 from burnbird.models import WebhookDelivery, WorkerTask
 from burnbird.worker import run_once
@@ -76,11 +76,16 @@ def test_deliveries_come_before_tasks(
         steps.append("backfill")
         return True
 
+    def redeliveries(*_: object) -> bool:
+        steps.append("redeliver")
+        return True
+
     monkeypatch.setattr(events, "process_pending", deliveries)
     monkeypatch.setattr(reconcile, "run", tasks)
+    monkeypatch.setattr(redeliver, "run", redeliveries)
     monkeypatch.setattr(backfill, "run_next", backfills)
     run_once(sessions, github, NOW)
-    assert steps == ["deliveries", "reconcile", "backfill"]
+    assert steps == ["deliveries", "reconcile", "redeliver", "backfill"]
 
 
 def test_a_failed_step_is_logged_and_the_next_still_runs(

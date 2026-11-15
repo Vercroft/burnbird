@@ -1,5 +1,9 @@
+import logging
+import threading
+import time
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -9,8 +13,10 @@ from httpx2 import Response
 from sqlalchemy import Engine, delete, insert, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
+from burnbird import retention
 from burnbird.billing.classify import classify
 from burnbird.billing.providers import GITHUB, Kind, load_table
+from burnbird.github import events, schemas
 from burnbird.github.events import MAX_ATTEMPTS, claim, process_next, process_pending
 from burnbird.models import (
     Account,
@@ -24,6 +30,7 @@ from burnbird.models import (
     UserSession,
     WebhookDelivery,
 )
+from tests.github.conftest import workflow_job_body
 
 type Body = dict[str, Any]
 
@@ -491,3 +498,194 @@ def test_a_claimed_delivery_is_skipped_by_another_worker(engine: Engine) -> None
     finally:
         with engine.begin() as connection:
             connection.execute(delete(WebhookDelivery).where(WebhookDelivery.id == delivery))
+
+
+@pytest.mark.parametrize(
+    ("deleted_at", "stored"),
+    [
+        pytest.param(datetime(2026, 11, 13, 10, 0, 1, tzinfo=UTC), False, id="job before"),
+        pytest.param(datetime(2026, 11, 13, 9, 59, 59, tzinfo=UTC), True, id="job after"),
+    ],
+)
+def test_a_job_created_before_its_account_s_data_was_deleted_is_never_stored_again(
+    deliver: Callable[..., Response],
+    installation: Callable[..., Body],
+    workflow_job: Callable[..., Body],
+    sessions: sessionmaker[Session],
+    session: Session,
+    caplog: pytest.LogCaptureFixture,
+    deleted_at: datetime,
+    stored: bool,
+) -> None:
+    # A resent (or late) delivery of a job created at 10:00:00 on the 13th.
+    caplog.set_level(logging.INFO)
+    _install(deliver, installation)
+    _run(sessions)
+    account = session.get(Account, ORG)
+    assert account is not None
+    account.data_deleted_at = deleted_at
+    session.flush()
+    _accepted(deliver("workflow_job", _job_body(workflow_job)))
+    _run(sessions)
+    assert [job.id for job in _jobs(session)] == ([1] if stored else [])
+    if not stored:
+        assert (
+            f"job 1 of repository {REPOSITORY[ORG]} was created before account {ORG}'s data "
+            "was deleted; not stored"
+        ) in caplog.text
+
+
+def test_a_job_delivered_while_its_account_s_data_is_deleted_is_not_stored(engine: Engine) -> None:
+    # Two connections need committed rows; they are deleted again at the end. One connection
+    # runs Delete my data and holds it uncommitted; the worker processes a delivery of an older
+    # job meanwhile. It must wait for the deletion, then store nothing.
+    with engine.begin() as connection:
+        connection.execute(
+            insert(Account).values(
+                id=7961, login="example-7961", type="User", github_plan="GitHub Free"
+            )
+        )
+        connection.execute(
+            insert(Installation).values(id=4961, account_id=7961, created_at=_now())
+        )
+        connection.execute(
+            insert(Repository).values(id=5961, installation_id=4961, name="app", private=True)
+        )
+        body = workflow_job_body(job_id=9961, installation_id=4961, repository_id=5961)
+        connection.execute(
+            insert(WebhookDelivery).values(
+                id=uuid.UUID(int=9961),
+                received_at=_now(),
+                event="workflow_job",
+                action="completed",
+                payload=schemas.WorkflowJobCompleted.model_validate(body).model_dump(mode="json"),
+            )
+        )
+    try:
+        with engine.connect() as deleting, ThreadPoolExecutor(max_workers=1) as pool:
+            held = deleting.begin()
+            deleting_sessions = sessionmaker(
+                bind=deleting, join_transaction_mode="create_savepoint"
+            )
+            with deleting_sessions.begin() as session:
+                retention.delete_my_data(session, 7961)
+            processing = pool.submit(process_next, sessionmaker(bind=engine), _now())
+            time.sleep(0.5)
+            assert not processing.done()
+            held.commit()
+            assert processing.result(timeout=10) is True
+        with Session(engine) as check:
+            assert check.scalar(select(Job).where(Job.id == 9961)) is None
+    finally:
+        with engine.begin() as connection:
+            connection.execute(
+                delete(WebhookDelivery).where(WebhookDelivery.id == uuid.UUID(int=9961))
+            )
+            connection.execute(delete(Account).where(Account.id == 7961))
+
+
+def test_delete_my_data_and_a_webhook_take_their_locks_in_one_order(engine: Engine) -> None:
+    # Two connections need committed rows; they are deleted again at the end. One connection
+    # stands for store_job: it holds the repository, Delete my data starts, and only then does it
+    # read the account FOR SHARE. In one order, Delete my data waits; in the other, they deadlock.
+    with engine.begin() as connection:
+        connection.execute(
+            insert(Account).values(
+                id=7971, login="example-7971", type="User", github_plan="GitHub Free"
+            )
+        )
+        connection.execute(
+            insert(Installation).values(id=4971, account_id=7971, created_at=_now())
+        )
+        connection.execute(
+            insert(Repository).values(id=5971, installation_id=4971, name="app", private=True)
+        )
+    try:
+        with engine.connect() as webhook, ThreadPoolExecutor(max_workers=1) as pool:
+            held = webhook.begin()
+            webhook.execute(text("SET LOCAL lock_timeout = '3s'"))
+            webhook.execute(text("SELECT id FROM repository WHERE id = 5971 FOR UPDATE"))
+
+            def delete_mine() -> None:
+                with sessionmaker(bind=engine).begin() as session:
+                    session.execute(text("SET LOCAL lock_timeout = '3s'"))
+                    retention.delete_my_data(session, 7971)
+
+            deleting = pool.submit(delete_mine)
+            time.sleep(0.5)
+            webhook.execute(text("SELECT data_deleted_at FROM account WHERE id = 7971 FOR SHARE"))
+            held.commit()
+            deleting.result(timeout=10)
+        with Session(engine) as check:
+            assert check.get_one(Account, 7971).data_deleted_at is not None
+    finally:
+        with engine.begin() as connection:
+            connection.execute(delete(Account).where(Account.id == 7971))
+
+
+def test_a_webhook_holds_the_repository_before_the_account_so_delete_my_data_waits(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two connections need committed rows; they are deleted again at the end. The worker stops
+    # inside store_job after its locks and before the repository upsert; Delete my data starts
+    # meanwhile. Holding the repository first, the worker makes it wait instead of deadlocking.
+    with engine.begin() as connection:
+        connection.execute(
+            insert(Account).values(
+                id=7991, login="example-7991", type="User", github_plan="GitHub Free"
+            )
+        )
+        connection.execute(
+            insert(Installation).values(id=4991, account_id=7991, created_at=_now())
+        )
+        connection.execute(
+            insert(Repository).values(id=5991, installation_id=4991, name="app", private=True)
+        )
+        body = workflow_job_body(job_id=9991, installation_id=4991, repository_id=5991)
+        connection.execute(
+            insert(WebhookDelivery).values(
+                id=uuid.UUID(int=9991),
+                received_at=_now(),
+                event="workflow_job",
+                action="completed",
+                payload=schemas.WorkflowJobCompleted.model_validate(body).model_dump(mode="json"),
+            )
+        )
+    reached, release = threading.Event(), threading.Event()
+    real = events.store_repository
+
+    def paused(session: Session, installation_id: int, repository: schemas.Repository) -> None:
+        reached.set()
+        assert release.wait(timeout=10)
+        real(session, installation_id, repository)
+
+    monkeypatch.setattr(events, "store_repository", paused)
+
+    def delete_mine() -> None:
+        with sessionmaker(bind=engine).begin() as session:
+            session.execute(text("SET LOCAL lock_timeout = '5s'"))
+            retention.delete_my_data(session, 7991)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            processing = pool.submit(process_next, sessionmaker(bind=engine), _now())
+            assert reached.wait(timeout=10)
+            deleting = pool.submit(delete_mine)
+            time.sleep(0.5)
+            release.set()
+            assert processing.result(timeout=15) is True
+            deleting.result(timeout=15)
+        with Session(engine) as check:
+            # The worker stored first; Delete my data, waiting for it, deleted the job. A deadlock
+            # would have aborted one of them: the delivery would wait for a retry, or the
+            # deletion would have failed.
+            assert check.scalar(select(Job).where(Job.id == 9991)) is None
+            assert check.get_one(Account, 7991).data_deleted_at is not None
+            delivery = check.get_one(WebhookDelivery, uuid.UUID(int=9991))
+            assert (delivery.processed_at is not None, delivery.attempts) == (True, 0)
+    finally:
+        with engine.begin() as connection:
+            connection.execute(
+                delete(WebhookDelivery).where(WebhookDelivery.id == uuid.UUID(int=9991))
+            )
+            connection.execute(delete(Account).where(Account.id == 7991))

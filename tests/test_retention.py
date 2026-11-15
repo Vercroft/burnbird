@@ -1,12 +1,14 @@
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import Connection, event, func, select
 from sqlalchemy.orm import Session
 
+from burnbird import retention
+from burnbird.github import backfill
 from burnbird.models import (
     Account,
     Base,
@@ -213,6 +215,20 @@ def test_delete_my_data_removes_the_user_and_their_personal_jobs_only(world: Ses
     }
 
 
+def test_delete_my_data_marks_when_the_personal_account_s_data_was_deleted(
+    world: Session,
+) -> None:
+    before = world.scalar(select(func.now()))
+    assert isinstance(before, datetime)
+    delete_my_data(world, PERSON)
+    world.expire_all()
+    person = world.get_one(Account, PERSON)
+    assert person.data_deleted_at is not None
+    assert person.data_deleted_at >= before - timedelta(seconds=1)
+    # An organisation's account is never marked by a user's request.
+    assert world.get_one(Account, ORG).data_deleted_at is None
+
+
 def test_delete_my_data_leaves_organisation_jobs(world: Session) -> None:
     # Only a User account is personal, even with the user's own ID: a user's request never
     # deletes an organisation's data.
@@ -305,3 +321,50 @@ def test_removing_another_installations_repository_deletes_nothing(world: Sessio
         remove_repositories(world, INSTALLATION[ORG], [REPOSITORY[OTHER_ORG], 9999]) == Deleted()
     )
     assert _rows(world) == before
+
+
+# Locking several repositories: always in ID order.
+
+
+@pytest.fixture
+def sent(connection: Connection) -> Iterator[list[str]]:
+    """The SQL of every statement sent on the test's connection, as compiled."""
+    statements: list[str] = []
+
+    def record(*args: object) -> None:
+        statements.append(str(args[2]))
+
+    event.listen(connection, "before_cursor_execute", record)
+    yield statements
+    event.remove(connection, "before_cursor_execute", record)
+
+
+def _locks(statements: list[str]) -> list[str]:
+    return [s for s in statements if "FOR UPDATE" in s or "FOR KEY SHARE" in s]
+
+
+@pytest.mark.parametrize(("key_share", "mode"), [(False, "FOR UPDATE"), (True, "FOR KEY SHARE")])
+def test_lock_repositories_locks_in_id_order(
+    session: Session, sent: list[str], key_share: bool, mode: str
+) -> None:
+    retention.lock_repositories(session, [5002, 5001], key_share=key_share)
+    [lock] = _locks(sent)
+    assert "ORDER BY repository.id" in lock
+    assert lock.rstrip().endswith(f"ORDER BY repository.id {mode}")
+
+
+@pytest.mark.parametrize(
+    ("lock_several", "mode"),
+    [
+        pytest.param(
+            lambda s: retention.delete_my_data(s, 7001), "FOR UPDATE", id="delete_my_data"
+        ),
+        pytest.param(lambda s: backfill.requeue(s, [5002, 5001]), "FOR KEY SHARE", id="requeue"),
+    ],
+)
+def test_every_path_that_locks_several_repositories_locks_them_in_id_order(
+    session: Session, sent: list[str], lock_several: Callable[[Session], object], mode: str
+) -> None:
+    lock_several(session)
+    [lock] = _locks(sent)
+    assert lock.rstrip().endswith(f"ORDER BY repository.id {mode}")

@@ -90,12 +90,32 @@ def _job_completed(session: Session, data: dict[str, Any]) -> None:
 def store_job(session: Session, event: schemas.WorkflowJobCompleted) -> None:
     """Store one completed job attempt, classified and billed, and its repository.
 
-    The webhook's ``workflow_job.completed`` and the backfill both use it, so a job is stored the
-    same way whichever path brings it.
+    The webhook's ``workflow_job.completed`` (redeliveries included) and the backfill both use it,
+    so a job is stored the same way whichever path brings it, and a job created before its
+    account's data was deleted is never stored again.
     """
     installation = session.get(Installation, event.installation.id)
     if installation is None:
         raise UnknownInstallationError(f"installation {event.installation.id} is not stored")
+    # Locks in the order Delete my data takes them, the repository (if stored) and then the
+    # account, so a deletion in progress is waited for and its mark is seen.
+    session.execute(
+        select(Repository.id).where(Repository.id == event.repository.id).with_for_update()
+    ).all()
+    deleted_at = session.scalar(
+        select(Account.data_deleted_at)
+        .where(Account.id == installation.account_id)
+        .with_for_update(read=True)
+    )
+    if deleted_at is not None and event.workflow_job.created_at < deleted_at:
+        # Its user asked to delete their data after this job: it is never stored again.
+        logger.info(
+            "job %d of repository %d was created before account %d's data was deleted; not stored",
+            event.workflow_job.id,
+            event.repository.id,
+            installation.account_id,
+        )
+        return
     repository = event.repository
     store_repository(session, installation.id, repository)
     rows = session.execute(

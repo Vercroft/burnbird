@@ -9,8 +9,9 @@ Each sign-in also reads the user's email addresses, and only the one GitHub mark
 verified is kept. ``GET /user/emails`` needs the App's "Email addresses" user permission; without
 it, "the API will return a 403 response"
 (https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app).
-A 403 or 404, or no primary verified address, deletes the stored one. Any other failure keeps it
-and the sign-in goes on: the address is never needed to sign in, and never logged.
+A 403 or 404, or no primary verified address (or one ``user_email`` could not store), deletes the
+stored one. Any other failure keeps it and the sign-in goes on: the address is never needed to
+sign in, and never logged.
 """
 
 import hashlib
@@ -43,7 +44,14 @@ from burnbird.github.client import (
 )
 from burnbird.github.client import GithubAnswerError as GithubAnswerError
 from burnbird.github.events import store_installation, store_repository
-from burnbird.models import GithubUser, UserEmail, UserInstallation, UserRepository, UserSession
+from burnbird.models import (
+    GithubUser,
+    UserEmail,
+    UserInstallation,
+    UserRepository,
+    UserSession,
+    storable_address,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +195,10 @@ async def _primary_email(github: Any, token: dict[str, Any]) -> tuple[str | None
         )
         return None, False
     primary = next((e.email for e in emails if e.primary and e.verified), None)
+    if primary is not None and not storable_address(primary):
+        # The table would refuse it, and the whole sign-in with it: kept as no address at all.
+        logger.warning("sign-in: GitHub's primary address is not usable; none is stored")
+        return None, True
     return primary, True
 
 

@@ -178,3 +178,44 @@ def test_the_session_is_labelled_with_its_device_and_never_the_raw_header(
     session.expire_all()
     [stored] = session.scalars(select(UserSession)).all()
     assert stored.device == "Firefox 140 on Linux, computer"
+
+
+def _address_of_length(length: int) -> str:
+    domain = "@" + "example.invalid"
+    return "x" * (length - len(domain)) + domain
+
+
+@pytest.mark.parametrize(
+    "address",
+    [_address_of_length(255), "@" + "unusable." + "example.invalid"],
+    ids=["255 characters", "starts with @"],
+)
+def test_an_address_the_table_would_refuse_is_not_stored_and_the_sign_in_succeeds(
+    address: str,
+    github: FakeGithub,
+    sign_in: SignIn,
+    session: Session,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _signed_in(sign_in)
+    assert _stored(session) is not None
+    github.emails = [email_item(address)]
+    caplog.set_level(logging.DEBUG)
+    _signed_in(sign_in)
+    assert _stored(session) is None
+    assert address not in caplog.text
+    [warning] = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert (
+        warning.getMessage() == "sign-in: GitHub's primary address is not usable; none is stored"
+    )
+
+
+def test_an_address_of_254_characters_is_stored(
+    github: FakeGithub, sign_in: SignIn, session: Session
+) -> None:
+    address = _address_of_length(254)
+    github.emails = [email_item(address)]
+    _signed_in(sign_in)
+    stored = _stored(session)
+    assert stored is not None
+    assert stored.address == address

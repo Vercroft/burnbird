@@ -50,6 +50,15 @@ class Base(DeclarativeBase):
     }
 
 
+# The longest email address ``user_email`` stores; its CHECK and sign-in's own check share it.
+EMAIL_MAX_LENGTH: Final = 254
+
+
+def storable_address(address: str) -> bool:
+    """Return whether ``user_email``'s CHECK accepts the address: not too long, "@" not first."""
+    return len(address) <= EMAIL_MAX_LENGTH and address.find("@") > 0
+
+
 def _github_id() -> Mapped[int]:
     # GitHub assigns the ID; the database never generates one.
     return mapped_column(BigInteger, primary_key=True, autoincrement=False)
@@ -237,8 +246,10 @@ class UserEmail(Base):
 
     __tablename__ = "user_email"
     __table_args__ = (
+        # The same rule as ``storable_address``.
         CheckConstraint(
-            "char_length(address) <= 254 AND position('@' in address) > 1", name="address"
+            f"char_length(address) <= {EMAIL_MAX_LENGTH} AND position('@' in address) > 1",
+            name="address",
         ),
     )
 

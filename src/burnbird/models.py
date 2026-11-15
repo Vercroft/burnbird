@@ -16,6 +16,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Identity,
     Index,
     Integer,
     LargeBinary,
@@ -49,6 +50,10 @@ class Base(DeclarativeBase):
         str: Text(),
     }
 
+
+# The kinds of email a user chooses, and where a recorded choice came from.
+EMAIL_KINDS: Final = ("usage_warnings", "weekly_summary", "news")
+CONSENT_SOURCES: Final = ("default", "settings", "one_click", "complaint")
 
 # The longest email address ``user_email`` stores; its CHECK and sign-in's own check share it.
 EMAIL_MAX_LENGTH: Final = 254
@@ -258,6 +263,45 @@ class UserEmail(Base):
     )
     address: Mapped[str]
     read_at: Mapped[datetime] = mapped_column(index=True)
+
+
+def _one_of(column: str, values: tuple[str, ...]) -> CheckConstraint:
+    listed = ", ".join(f"'{value}'" for value in values)
+    return CheckConstraint(f"{column} IN ({listed})", name=column)
+
+
+class EmailPreference(Base):
+    """Whether a user wants one kind of email; written for every kind when an address is stored."""
+
+    __tablename__ = "email_preference"
+    __table_args__ = (_one_of("kind", EMAIL_KINDS),)
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("github_user.id", ondelete="CASCADE"), primary_key=True
+    )
+    kind: Mapped[str] = mapped_column(primary_key=True)
+    enabled: Mapped[bool]
+    updated_at: Mapped[datetime]
+
+
+class EmailConsent(Base):
+    """One recorded choice about one kind of email: append-only, never updated.
+
+    ``text_version`` names the wording the user saw (``burnbird.email.consent.TEXT_VERSION``).
+    """
+
+    __tablename__ = "email_consent"
+    __table_args__ = (_one_of("kind", EMAIL_KINDS), _one_of("source", CONSENT_SOURCES))
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("github_user.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str]
+    enabled: Mapped[bool]
+    source: Mapped[str]
+    text_version: Mapped[str]
+    at: Mapped[datetime]
 
 
 class WebhookDelivery(Base):

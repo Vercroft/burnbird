@@ -1,0 +1,1 @@
+Run-out warnings by email: Burnbird emails your GitHub primary address when an allowance reaches 75% or 90% used, or is forecast to run out before it resets, for each account where you can see all of its use. Warnings stay on until you turn them off here. Each one has a link to turn them off in one click.

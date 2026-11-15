@@ -9,6 +9,8 @@ from burnbird.models import Base
 TABLES = {
     "account",
     "backfill",
+    "email_consent",
+    "email_preference",
     "github_user",
     "installation",
     "job",

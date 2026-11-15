@@ -13,7 +13,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from burnbird.models import UserEmail, UserSession
+from burnbird.email.preferences import set_choice
+from burnbird.models import EmailConsent, EmailPreference, UserEmail, UserSession
 from tests.auth.conftest import USER, Clock, FakeGithub, email_item, invented_address
 
 type SignIn = Callable[[], httpx2.Response]
@@ -219,3 +220,47 @@ def test_an_address_of_254_characters_is_stored(
     stored = _stored(session)
     assert stored is not None
     assert stored.address == address
+
+
+def _choice_rows(session: Session) -> tuple[dict[str, bool], int]:
+    session.expire_all()
+    choices = {
+        row.kind: row.enabled
+        for row in session.scalars(select(EmailPreference).where(EmailPreference.user_id == USER))
+    }
+    consents = session.scalars(select(EmailConsent).where(EmailConsent.user_id == USER)).all()
+    return choices, len(consents)
+
+
+def test_the_first_stored_address_writes_the_default_choices(
+    sign_in: SignIn, session: Session
+) -> None:
+    _signed_in(sign_in)
+    assert _choice_rows(session) == (
+        {"usage_warnings": True, "weekly_summary": False, "news": False},
+        3,
+    )
+
+
+def test_no_address_writes_no_choices(
+    github: FakeGithub, sign_in: SignIn, session: Session
+) -> None:
+    github.emails = []
+    _signed_in(sign_in)
+    assert _choice_rows(session) == ({}, 0)
+
+
+def test_an_address_deleted_and_read_again_keeps_the_user_s_choices(
+    github: FakeGithub, sign_in: SignIn, session: Session
+) -> None:
+    _signed_in(sign_in)
+    assert set_choice(session, USER, "usage_warnings", False, NOW)
+    session.flush()
+    github.emails = []
+    _signed_in(sign_in)
+    github.emails = [email_item(invented_address())]
+    _signed_in(sign_in)
+    assert _choice_rows(session) == (
+        {"usage_warnings": False, "weekly_summary": False, "news": False},
+        4,
+    )

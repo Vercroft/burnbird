@@ -1,3 +1,4 @@
+import logging
 import uuid
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
@@ -17,6 +18,7 @@ from burnbird.models import (
     Job,
     LabelSize,
     Repository,
+    UserEmail,
     UserInstallation,
     UserRepository,
     UserSession,
@@ -24,12 +26,15 @@ from burnbird.models import (
 )
 from burnbird.retention import (
     Deleted,
+    Purged,
     delete_my_data,
     purge_deliveries,
     purge_jobs,
     purge_sessions,
+    purge_stale_emails,
     remove_repositories,
     revoke_authorization,
+    run_purges,
     uninstall,
 )
 
@@ -86,6 +91,13 @@ def _delivery(
         event="installation",
         action="suspend",
         payload={"installation": {"id": INSTALLATION[ORG]}},
+    )
+
+
+def _email(user: int, read_at: datetime) -> UserEmail:
+    # Invented, on the reserved example.invalid domain.
+    return UserEmail(
+        user_id=user, address=f"user-{user}" + "@" + "example.invalid", read_at=read_at
     )
 
 
@@ -189,7 +201,50 @@ def test_a_session_is_deleted_when_it_expires(world: Session) -> None:
     assert _deleted(before, _rows(world)) == {"session": {(bytes([10]) * 32,)}}
 
 
-@pytest.mark.parametrize("purge", [purge_jobs, purge_deliveries, purge_sessions])
+def test_an_address_is_kept_exactly_30_days_after_a_sign_in_read_it(world: Session) -> None:
+    world.add_all(
+        [
+            _email(PERSON, NOW - timedelta(days=30)),
+            _email(MEMBER, NOW - timedelta(days=30) - TICK),
+        ]
+    )
+    before = _rows(world)
+    assert purge_stale_emails(world, NOW) == 1
+    assert _deleted(before, _rows(world)) == {"user_email": {(MEMBER,)}}
+
+
+def test_run_purges_runs_every_purge_and_logs_one_line_of_counts(
+    world: Session, caplog: pytest.LogCaptureFixture
+) -> None:
+    # One row just past each limit and one just inside it.
+    world.add_all(
+        [
+            _job(10, ORG, NOW - timedelta(days=90)),
+            _job(11, ORG, NOW - timedelta(days=90) - TICK),
+            _delivery(uuid.UUID(int=10), NOW - timedelta(days=7)),
+            _delivery(uuid.UUID(int=11), NOW - timedelta(days=7) - TICK),
+            _session(MEMBER, NOW, 10),
+            _session(MEMBER, NOW + TICK, 11),
+            _email(PERSON, NOW - timedelta(days=30)),
+            _email(MEMBER, NOW - timedelta(days=30) - TICK),
+        ]
+    )
+    before = _rows(world)
+    with caplog.at_level(logging.INFO, logger=retention.__name__):
+        assert run_purges(world, NOW) == Purged(jobs=1, deliveries=1, sessions=1, emails=1)
+    assert _deleted(before, _rows(world)) == {
+        "job": {(11, 1)},
+        "webhook_delivery": {(uuid.UUID(int=11),)},
+        "session": {(bytes([10]) * 32,)},
+        "user_email": {(MEMBER,)},
+    }
+    [record] = [r for r in caplog.records if r.name == retention.__name__]
+    assert record.getMessage() == "purge: 1 jobs, 1 deliveries, 1 sessions, 1 email addresses"
+
+
+@pytest.mark.parametrize(
+    "purge", [purge_jobs, purge_deliveries, purge_sessions, purge_stale_emails]
+)
 def test_a_time_without_a_timezone_is_refused(
     world: Session, purge: Callable[[Session, datetime], int]
 ) -> None:
@@ -213,6 +268,13 @@ def test_delete_my_data_removes_the_user_and_their_personal_jobs_only(world: Ses
         "user_repository": {(PERSON, REPOSITORY[PERSON]), (PERSON, REPOSITORY[ORG])},
         "github_user": {(PERSON,)},
     }
+
+
+def test_delete_my_data_removes_the_user_s_email_address(world: Session) -> None:
+    world.add_all([_email(PERSON, RECENT), _email(MEMBER, RECENT)])
+    before = _rows(world)
+    assert delete_my_data(world, PERSON).user_emails == 1
+    assert _deleted(before, _rows(world))["user_email"] == {(PERSON,)}
 
 
 def test_delete_my_data_marks_when_the_personal_account_s_data_was_deleted(
@@ -261,6 +323,13 @@ def test_a_revoked_user_loses_sessions_and_lists_but_no_jobs(world: Session) -> 
         "user_repository": {(PERSON, REPOSITORY[PERSON]), (PERSON, REPOSITORY[ORG])},
         "github_user": {(PERSON,)},
     }
+
+
+def test_a_revoked_user_loses_their_email_address(world: Session) -> None:
+    world.add_all([_email(PERSON, RECENT), _email(MEMBER, RECENT)])
+    before = _rows(world)
+    assert revoke_authorization(world, PERSON).user_emails == 1
+    assert _deleted(before, _rows(world))["user_email"] == {(PERSON,)}
 
 
 def test_revoking_an_unknown_user_deletes_nothing(world: Session) -> None:

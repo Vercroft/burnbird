@@ -125,6 +125,7 @@ def test_the_api_calls_ask_for_one_rest_version_with_the_token(
         "/user",
         "/user/installations",
         f"/user/installations/{INSTALLATION[ORG]}/repositories",
+        "/user/emails",
     ]
     for request in api:
         assert request.headers["x-github-api-version"] == "2026-03-10"

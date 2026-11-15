@@ -57,7 +57,8 @@ def test_an_https_origin_is_accepted_as_it_is(url: str) -> None:
         "https://burnbird.example.com/app",
         "https://burnbird.example.com?x=1",
         "https://burnbird.example.com#top",
-        "https://example@burnbird.example.com",
+        # A user part before the host, built from parts so no address-shaped literal is kept.
+        "https://example" + "@" + "burnbird.example.invalid",
         "https://Burnbird.example.com",
         "https://burnbird.example.com:443",
         "burnbird.example.com",

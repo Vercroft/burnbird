@@ -1,8 +1,9 @@
 """The stored tables: accounts, installations, repositories, jobs, users, sessions and settings.
 
-Job metadata only. No token, no raw webhook body and no email address is stored; a session is kept
-as the SHA-256 of its ID, never the ID itself. GitHub's own IDs are the primary keys. The worker's
-periodic tasks are stored here too.
+Job metadata, and for each signed-in user their GitHub primary verified email address. No token
+and no raw webhook body is stored; a session is kept as the SHA-256 of its ID, never the ID itself,
+with a coarse label of its device, never the raw header. GitHub's own IDs are the primary keys.
+The worker's periodic tasks are stored here too. PRIVACY.md lists every stored item.
 """
 
 import uuid
@@ -47,6 +48,15 @@ class Base(DeclarativeBase):
         datetime: DateTime(timezone=True),
         str: Text(),
     }
+
+
+# The longest email address ``user_email`` stores; its CHECK and sign-in's own check share it.
+EMAIL_MAX_LENGTH: Final = 254
+
+
+def storable_address(address: str) -> bool:
+    """Return whether ``user_email``'s CHECK accepts the address: not too long, "@" not first."""
+    return len(address) <= EMAIL_MAX_LENGTH and address.find("@") > 0
 
 
 def _github_id() -> Mapped[int]:
@@ -211,7 +221,10 @@ class UserSession(Base):
     """A signed-in session, stored as the SHA-256 of its ID."""
 
     __tablename__ = "session"
-    __table_args__ = (CheckConstraint("octet_length(id_sha256) = 32", name="id_sha256"),)
+    __table_args__ = (
+        CheckConstraint("octet_length(id_sha256) = 32", name="id_sha256"),
+        CheckConstraint("char_length(device) <= 80", name="device"),
+    )
 
     id_sha256: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)
     user_id: Mapped[int] = mapped_column(
@@ -219,6 +232,32 @@ class UserSession(Base):
     )
     created_at: Mapped[datetime]
     expires_at: Mapped[datetime] = mapped_column(index=True)
+    # A coarse label such as "Firefox 140 on Linux, computer", from ``burnbird.auth.device``.
+    device: Mapped[str | None]
+
+
+class UserEmail(Base):
+    """A user's GitHub primary verified email address, as read at their last sign-in.
+
+    Only an address GitHub marks both primary and verified is stored, so there is no flag for
+    either. ``read_at`` is when a sign-in last read it; one not read again within
+    ``retention.EMAIL_FRESHNESS`` is deleted.
+    """
+
+    __tablename__ = "user_email"
+    __table_args__ = (
+        # The same rule as ``storable_address``.
+        CheckConstraint(
+            f"char_length(address) <= {EMAIL_MAX_LENGTH} AND position('@' in address) > 1",
+            name="address",
+        ),
+    )
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("github_user.id", ondelete="CASCADE"), primary_key=True
+    )
+    address: Mapped[str]
+    read_at: Mapped[datetime] = mapped_column(index=True)
 
 
 class WebhookDelivery(Base):

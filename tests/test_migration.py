@@ -16,6 +16,7 @@ TABLES = {
     "redelivery_request",
     "repository",
     "session",
+    "user_email",
     "user_installation",
     "user_repository",
     "webhook_delivery",

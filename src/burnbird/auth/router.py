@@ -20,6 +20,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.concurrency import run_in_threadpool
 
 from burnbird.auth.dependencies import auth_state, csrf_protected
+from burnbird.auth.device import device_label
 from burnbird.auth.service import (
     SESSION_COOKIE,
     SESSION_LIFETIME,
@@ -102,6 +103,7 @@ async def callback(request: Request) -> Response:
                 sign_in,
                 state.now(),
                 request.cookies.get(SESSION_COOKIE),
+                device_label(request.headers),
             )
         except SQLAlchemyError as err:
             # Answered here, not left to the server's error page, so the OAuth cookie is cleared.

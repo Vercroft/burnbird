@@ -1,8 +1,8 @@
 """Tests for commit_policy.py: each rule passes a clean case and fails a planted one.
 
 Planted values are built at run time, so none is ever committed: dashes from code points, an unreviewed link host
-from parts (a literal link would trip this repository's own leak check). Planted people use the reserved example.com
-domain. Tests that run git work only in a throwaway repository (see _ThrowawayRepo).
+from parts (a literal link would trip this repository's own leak check). Planted people use the reserved
+example.invalid domain, their addresses also built from parts. Tests that run git work only in a throwaway repository (see _ThrowawayRepo).
 """
 
 import contextlib
@@ -16,8 +16,11 @@ from unittest import mock
 
 import commit_policy as policy
 
-APPROVED = "1+approved@users.noreply.github.com"
-STRANGER = "stranger@example.com"
+APPROVED = "approved" + "@" + "example.invalid"
+STRANGER = "stranger" + "@" + "example.invalid"
+# The same address as SECOND_LOWER, in other letter cases.
+SECOND = "Second" + "@" + "Example.Invalid"
+SECOND_LOWER = "second" + "@" + "example.invalid"
 EM_DASH = chr(0x2014)
 EN_DASH = chr(0x2013)
 UNREVIEWED_HOST = "unreviewed-host" + "." + "org"
@@ -67,10 +70,8 @@ class _ThrowawayRepo:
 
 class ParseAllowed(unittest.TestCase):
     def test_reads_bare_and_named_addresses_and_skips_comments(self) -> None:
-        text = f"# approved people\n\n{APPROVED}\nSomeone <Second@Users.Noreply.Github.Com>\n"
-        self.assertEqual(
-            policy.parse_allowed(text), frozenset({APPROVED, "second@users.noreply.github.com"})
-        )
+        text = f"# approved people\n\n{APPROVED}\nSomeone <{SECOND}>\n"
+        self.assertEqual(policy.parse_allowed(text), frozenset({APPROVED, SECOND_LOWER}))
 
     def test_empty_or_missing_gives_nothing(self) -> None:
         self.assertEqual(policy.parse_allowed(None), frozenset())

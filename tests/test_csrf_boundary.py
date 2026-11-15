@@ -1,0 +1,53 @@
+"""Every POST route depends on ``csrf_protected``, except the ones listed here with their reason.
+
+FastAPI 0.162 keeps an included router as one entry of ``app.routes`` whose ``original_router``
+holds its routes, so the walk below opens those; any other kind of entry fails the test, so a
+route cannot hide from it.
+"""
+
+import secrets
+from collections.abc import Iterator
+
+from fastapi.dependencies.models import Dependant
+from fastapi.routing import APIRoute
+from sqlalchemy.orm import Session, sessionmaker
+from starlette.routing import BaseRoute
+
+from burnbird.auth.config import AuthSettings
+from burnbird.auth.dependencies import csrf_protected
+from burnbird.web import create_app
+
+# GitHub's webhook proves itself with its HMAC signature, and carries no session.
+EXEMPT = {"/github/webhook"}
+
+
+def _api_routes(routes: list[BaseRoute]) -> Iterator[APIRoute]:
+    for route in routes:
+        if isinstance(route, APIRoute):
+            yield route
+            continue
+        included = getattr(route, "original_router", None)
+        assert included is not None, f"an entry the walk cannot open: {type(route).__name__}"
+        yield from _api_routes(included.routes)
+
+
+def _calls(dependant: Dependant) -> Iterator[object]:
+    for dependency in dependant.dependencies:
+        yield dependency.call
+        yield from _calls(dependency)
+
+
+def test_every_post_but_the_exempt_ones_checks_csrf(
+    sessions: sessionmaker[Session], auth_settings: AuthSettings
+) -> None:
+    app = create_app(secrets.token_bytes(32), sessions, auth_settings)
+    posts = {
+        route.path: route
+        for route in _api_routes(app.routes)
+        if "POST" in (route.methods or set())
+    }
+    unprotected = {
+        path for path, route in posts.items() if csrf_protected not in _calls(route.dependant)
+    }
+    assert unprotected == EXEMPT
+    assert {"/auth/logout", "/you/email", "/you/delete"} <= set(posts)

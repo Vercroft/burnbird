@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block main %}
+<section>
+<h2>Email</h2>
+{% if data.address %}
+<p>Your address: {{ data.address }}, read from GitHub on {{ read_at }}.</p>
+<p>Warnings continue until {{ warnings_until }}. Sign in to keep them.</p>
+{% else %}
+<p>Burnbird has no email address for you. It stores your GitHub primary address when GitHub marks it verified and lets Burnbird read it. To get run-out warnings by email, approve Burnbird's 'Email addresses' permission on GitHub if asked, then sign in again.</p>
+{% endif %}
+{% if data.warnings is not none %}
+<form method="post" action="/you/email">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<p><label><input type="checkbox" name="{{ warnings_field }}" value="on"{% if data.warnings %} checked{% endif %}> Run-out warnings</label></p>
+<p>{{ consent_text }}</p>
+<p><button type="submit">Save</button></p>
+</form>
+{% endif %}
+</section>
+<section>
+<h2>Sessions</h2>
+<ul>
+{% for device, started in sessions %}
+<li>{{ device }}, signed in on {{ started }}</li>
+{% endfor %}
+</ul>
+</section>
+<section>
+<h2>Accounts you can see</h2>
+{% if data.accounts %}
+<ul>
+{% for login in data.accounts %}
+<li>{{ login }}</li>
+{% endfor %}
+</ul>
+{% else %}
+<p>None yet.</p>
+{% endif %}
+</section>
+<section>
+<h2>Delete my data</h2>
+<p>This removes what Burnbird stores about you now: your user record, your email address and choices, your sessions and access lists, and the jobs of your personal account. While the App stays installed, new jobs are collected again. Uninstall the App to stop collection.</p>
+<form method="post" action="/you/delete">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<p><button type="submit">Delete my data</button></p>
+</form>
+</section>
+<p><a href="{{ privacy_url }}">What Burnbird stores, and why</a></p>
+{% endblock %}

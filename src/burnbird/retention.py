@@ -2,9 +2,11 @@
 
 Pure functions over a Session. They never commit: the caller runs each in one transaction, so a
 failure deletes nothing. Children are deleted before their parents, so every count is exact; the
-tables' ON DELETE CASCADE keys are only the safety net.
+tables' ON DELETE CASCADE keys are only the safety net. ``run_purges`` runs every time-based
+purge; the worker's daily ``burnbird.purge`` task calls it.
 """
 
+import logging
 from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -21,14 +23,19 @@ from burnbird.models import (
     Job,
     LabelSize,
     Repository,
+    UserEmail,
     UserInstallation,
     UserRepository,
     UserSession,
     WebhookDelivery,
 )
 
+logger = logging.getLogger(__name__)
+
 JOB_RETENTION: Final = timedelta(days=90)
 DELIVERY_RETENTION: Final = timedelta(days=7)
+# An email address not read again at a sign-in within this long is deleted.
+EMAIL_FRESHNESS: Final = timedelta(days=30)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +51,36 @@ class Deleted:
     installations: int = 0
     accounts: int = 0
     sessions: int = 0
+    user_emails: int = 0
     users: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class Purged:
+    """How many rows each time-based purge removed."""
+
+    jobs: int
+    deliveries: int
+    sessions: int
+    emails: int
+
+
+def run_purges(session: Session, now: datetime) -> Purged:
+    """Run every time-based purge in the caller's transaction, and log one line of counts."""
+    purged = Purged(
+        jobs=purge_jobs(session, now),
+        deliveries=purge_deliveries(session, now),
+        sessions=purge_sessions(session, now),
+        emails=purge_stale_emails(session, now),
+    )
+    logger.info(
+        "purge: %d jobs, %d deliveries, %d sessions, %d email addresses",
+        purged.jobs,
+        purged.deliveries,
+        purged.sessions,
+        purged.emails,
+    )
+    return purged
 
 
 def purge_jobs(session: Session, now: datetime) -> int:
@@ -62,6 +98,12 @@ def purge_deliveries(session: Session, now: datetime) -> int:
 def purge_sessions(session: Session, now: datetime) -> int:
     """Delete the sessions that have expired at ``now``; return how many."""
     return _count(session, delete(UserSession).where(UserSession.expires_at <= _aware(now)))
+
+
+def purge_stale_emails(session: Session, now: datetime) -> int:
+    """Delete the addresses no sign-in read in the 30 days before ``now``; return how many."""
+    cutoff = _aware(now) - EMAIL_FRESHNESS
+    return _count(session, delete(UserEmail).where(UserEmail.read_at < cutoff))
 
 
 def lock_repositories(
@@ -83,7 +125,7 @@ def lock_repositories(
 
 
 def delete_my_data(session: Session, user_id: int) -> Deleted:
-    """Delete a user, their sessions and access lists, and their personal account's jobs.
+    """Delete a user, their email address, sessions and access lists, and their personal jobs.
 
     The personal account is the account with the user's own ID and type ``User``. Its repository
     rows are locked first, in ID order as a re-queue locks them, and before the queued row or the
@@ -123,7 +165,7 @@ def delete_my_data(session: Session, user_id: int) -> Deleted:
 
 
 def revoke_authorization(session: Session, user_id: int) -> Deleted:
-    """Delete a user who revoked the App's authorization: their sessions and access lists.
+    """Delete a user who revoked the App's authorization: address, sessions and access lists.
 
     Revoking does not uninstall the App, so every account's job data stays; it goes on uninstall.
     A user who is not stored deletes nothing.
@@ -189,6 +231,7 @@ def _user_rows(session: Session, user_id: int) -> dict[str, int]:
         "user_repositories": _count(
             session, delete(UserRepository).where(UserRepository.user_id == user_id)
         ),
+        "user_emails": _count(session, delete(UserEmail).where(UserEmail.user_id == user_id)),
         "users": _count(session, delete(GithubUser).where(GithubUser.id == user_id)),
     }
 

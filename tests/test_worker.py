@@ -1,7 +1,7 @@
 import logging
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx2
 import pytest
@@ -9,10 +9,10 @@ from joserfc.jwk import RSAKey
 from sqlalchemy import insert
 from sqlalchemy.orm import Session, sessionmaker
 
-from burnbird import worker
+from burnbird import purge, worker
 from burnbird.github import backfill, events, reconcile, redeliver
 from burnbird.github.client import GithubApp
-from burnbird.models import WebhookDelivery, WorkerTask
+from burnbird.models import GithubUser, UserSession, WebhookDelivery, WorkerTask
 from burnbird.worker import run_once
 
 NOW = datetime(2026, 11, 14, 12, 0, tzinfo=UTC)
@@ -80,12 +80,17 @@ def test_deliveries_come_before_tasks(
         steps.append("redeliver")
         return True
 
+    def purges(*_: object) -> bool:
+        steps.append("purge")
+        return True
+
     monkeypatch.setattr(events, "process_pending", deliveries)
     monkeypatch.setattr(reconcile, "run", tasks)
     monkeypatch.setattr(redeliver, "run", redeliveries)
     monkeypatch.setattr(backfill, "run_next", backfills)
+    monkeypatch.setattr(purge, "run", purges)
     run_once(sessions, github, NOW)
-    assert steps == ["deliveries", "reconcile", "redeliver", "backfill"]
+    assert steps == ["deliveries", "reconcile", "redeliver", "backfill", "purge"]
 
 
 def test_a_failed_step_is_logged_and_the_next_still_runs(
@@ -122,3 +127,33 @@ def test_a_failed_reconciliation_is_logged_and_the_pass_returns(
     [record] = [r for r in caplog.records if r.name == worker.__name__]
     assert record.getMessage() == "worker: the reconcile step failed"
     assert record.exc_info is not None
+
+
+def test_a_pass_purges_what_is_past_its_limit_once_a_day(
+    sessions: sessionmaker[Session], session: Session, github: GithubApp
+) -> None:
+    session.add(GithubUser(id=7301, login="example-purged", last_sign_in_at=NOW))
+    session.flush()
+    session.add(_expired_session(1, NOW))
+    session.flush()
+    run_once(sessions, github, NOW)
+    session.expire_all()
+    assert session.get(UserSession, bytes([1]) * 32) is None
+    # The next one expires within the day: the purge is not due again until a day has passed.
+    session.add(_expired_session(2, NOW + timedelta(hours=1)))
+    session.flush()
+    run_once(sessions, github, NOW + timedelta(hours=2))
+    session.expire_all()
+    assert session.get(UserSession, bytes([2]) * 32) is not None
+    run_once(sessions, github, NOW + timedelta(days=1))
+    session.expire_all()
+    assert session.get(UserSession, bytes([2]) * 32) is None
+
+
+def _expired_session(n: int, expires_at: datetime) -> UserSession:
+    return UserSession(
+        id_sha256=bytes([n]) * 32,
+        user_id=7301,
+        created_at=expires_at - timedelta(hours=8),
+        expires_at=expires_at,
+    )

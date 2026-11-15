@@ -1,16 +1,24 @@
 """Sign-in's work: Authlib's GitHub client, the user's lists from GitHub, and storing a sign-in.
 
 Authlib makes and checks ``state`` and the PKCE S256 verifier, keeps them in the signed OAuth
-cookie, exchanges the code and sends the user access token on our three GET calls. The token stays
-in this request's memory: it is never stored, logged or put in an exception. GitHub's web flow:
+cookie, exchanges the code and sends the user access token on our GET calls. The token stays in
+this request's memory: it is never stored, logged or put in an exception. GitHub's web flow:
 https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app
+
+Each sign-in also reads the user's email addresses, and only the one GitHub marks both primary and
+verified is kept. ``GET /user/emails`` needs the App's "Email addresses" user permission; without
+it, "the API will return a 403 response"
+(https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app).
+A 403 or 404, or no primary verified address, deletes the stored one. Any other failure keeps it
+and the sign-in goes on: the address is never needed to sign in, and never logged.
 """
 
 import hashlib
+import logging
 import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 import httpx2
@@ -18,21 +26,32 @@ import httpx2
 # The one place Authlib is imported; OAuthError is re-exported for the router.
 from authlib.integrations.starlette_client import OAuth  # type: ignore[import-untyped]  # Authlib ships no type information
 from authlib.integrations.starlette_client import OAuthError as OAuthError
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import delete
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird.auth.config import AuthSettings
 from burnbird.github import schemas
-from burnbird.github.client import API_HEADERS, API_HOST, PER_PAGE, next_link
+from burnbird.github.client import (
+    API_HEADERS,
+    API_HOST,
+    PER_PAGE,
+    RateLimitedError,
+    next_link,
+    rate_limit_resume,
+)
 from burnbird.github.client import GithubAnswerError as GithubAnswerError
 from burnbird.github.events import store_installation, store_repository
-from burnbird.models import GithubUser, UserInstallation, UserRepository, UserSession
+from burnbird.models import GithubUser, UserEmail, UserInstallation, UserRepository, UserSession
+
+logger = logging.getLogger(__name__)
 
 AUTHORIZE_URL: Final = "https://github.com/login/oauth/authorize"
 # Where the code is exchanged for the user access token.
 EXCHANGE_URL: Final = "https://github.com/login/oauth/access_token"
+# GitHub's answers to ``GET /user/emails`` when the App may not read the user's addresses.
+NO_EMAIL_PERMISSION: Final = frozenset({403, 404})
 # Every GitHub call has a time limit; none is retried here (the code is single use, and a failed
 # sign-in is simply started again).
 TIMEOUT_SECONDS: Final = 10.0
@@ -66,6 +85,10 @@ class SignIn:
     repositories: tuple[ListedRepository, ...]
     # Installations in GitHub's list that Burnbird does not handle (an enterprise account).
     skipped: int
+    # The primary verified address, or None when GitHub gave none or may not share one.
+    email: str | None = None
+    # False when GitHub's answer could not be read: the stored address, if any, is kept.
+    email_read: bool = True
 
 
 class _User(schemas.Payload):
@@ -80,6 +103,15 @@ class _Installations(schemas.Payload):
 class _Repositories(schemas.Payload):
     # Items stay raw here, so each one's ``permissions`` can be read strictly (see ``_admin``).
     repositories: tuple[dict[str, Any], ...]
+
+
+class _Email(schemas.Payload):
+    email: str
+    primary: bool
+    verified: bool
+
+
+_EMAILS: Final = TypeAdapter(list[_Email])
 
 
 def github_oauth(
@@ -124,7 +156,38 @@ async def fetch_sign_in(github: Any, token: dict[str, Any]) -> SignIn:
         )
         for item in _Repositories.model_validate(page).repositories
     ]
-    return SignIn(user.id, user.login, tuple(installations), tuple(repositories), skipped)
+    email, email_read = await _primary_email(github, token)
+    return SignIn(
+        user.id, user.login, tuple(installations), tuple(repositories), skipped, email, email_read
+    )
+
+
+async def _primary_email(github: Any, token: dict[str, Any]) -> tuple[str | None, bool]:
+    """Return the primary verified address and whether GitHub's answer was read.
+
+    A 403 or 404 (not a rate limit) means the App may not read the addresses: none is kept. A
+    rate limit, a network error or an answer not as documented keeps the stored one.
+    """
+    try:
+        pages = await _pages(github, token, "user/emails")
+        emails = [email for page in pages for email in _EMAILS.validate_python(page)]
+    except RateLimitedError:
+        logger.warning("sign-in: the email addresses were rate limited; the stored one is kept")
+        return None, False
+    except GithubAnswerError as err:
+        if err.status in NO_EMAIL_PERMISSION:
+            logger.info("sign-in: GitHub shares no email address (%d)", err.status)
+            return None, True
+        logger.warning("sign-in: reading the email addresses failed; the stored one is kept")
+        return None, False
+    except (httpx2.HTTPError, OAuthError, ValidationError, ValueError) as err:
+        logger.warning(
+            "sign-in: reading the email addresses failed: %s; the stored one is kept",
+            type(err).__name__,
+        )
+        return None, False
+    primary = next((e.email for e in emails if e.primary and e.verified), None)
+    return primary, True
 
 
 def _admin(item: dict[str, Any]) -> bool:
@@ -156,7 +219,11 @@ async def _pages(github: Any, token: dict[str, Any], path: str) -> list[Any]:
             raise GithubAnswerError(f"GET {path} has more than {MAX_PAGES} pages")
         response: httpx2.Response = await github.get(url, token=token, headers=dict(API_HEADERS))
         if response.status_code != httpx2.codes.OK:
-            raise GithubAnswerError(f"GET {path} answered {response.status_code}")
+            if rate_limit_resume(response, datetime.now(UTC)) is not None:
+                raise RateLimitedError(f"GET {path}", datetime.now(UTC))
+            raise GithubAnswerError(
+                f"GET {path} answered {response.status_code}", response.status_code
+            )
         pages.append(response.json())
         url = next_link(response, f"GET {path}")
     return pages
@@ -168,13 +235,19 @@ def session_digest(session_id: str) -> bytes:
 
 
 def store_sign_in(
-    sessions: sessionmaker[Session], sign_in: SignIn, now: datetime, old_session_id: str | None
+    sessions: sessionmaker[Session],
+    sign_in: SignIn,
+    now: datetime,
+    old_session_id: str | None,
+    device: str | None = None,
 ) -> str:
     """Store a sign-in in one transaction and return the new session ID for the cookie.
 
     The user's installation and repository lists are replaced by GitHub's, installations and
     repositories not stored yet are added, and the session the request came with (if any) is
-    replaced by a new one. A failure stores nothing.
+    replaced by a new one, labelled with ``device``. The stored email address is replaced by the
+    one GitHub gave, or deleted when it gave none; it is kept as it was when GitHub's answer could
+    not be read. A failure stores nothing.
     """
     session_id = secrets.token_urlsafe(32)
     user_id = sign_in.user_id
@@ -206,6 +279,8 @@ def store_sign_in(
                 for r in sign_in.repositories
             ],
         )
+        if sign_in.email_read:
+            _store_email(session, user_id, sign_in.email, now)
         if old_session_id is not None:
             session.execute(
                 delete(UserSession).where(UserSession.id_sha256 == session_digest(old_session_id))
@@ -216,9 +291,23 @@ def store_sign_in(
                 user_id=user_id,
                 created_at=now,
                 expires_at=now + SESSION_LIFETIME,
+                device=device,
             )
         )
     return session_id
+
+
+def _store_email(session: Session, user_id: int, address: str | None, now: datetime) -> None:
+    if address is None:
+        session.execute(delete(UserEmail).where(UserEmail.user_id == user_id))
+        return
+    session.execute(
+        insert(UserEmail)
+        .values(user_id=user_id, address=address, read_at=now)
+        .on_conflict_do_update(
+            index_elements=[UserEmail.user_id], set_={"address": address, "read_at": now}
+        )
+    )
 
 
 def _insert(

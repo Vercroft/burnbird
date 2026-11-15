@@ -1,2 +1,3 @@
 scripts/check-image-age.py: # noqa: S603  # path from shutil.which, no shell, fixed arguments
 src/burnbird/auth/service.py: # type: ignore[import-untyped]  # Authlib ships no type information
+tests/test_public_text.py: # noqa: S603  # path from shutil.which, no shell, fixed arguments

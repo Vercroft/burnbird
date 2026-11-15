@@ -47,6 +47,21 @@ def s256(verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).decode().rstrip("=")
 
 
+def email_item(address: str, *, primary: bool = True, verified: bool = True) -> Body:
+    """One entry of ``GET /user/emails``, as GitHub's example shows it."""
+    return {
+        "email": address,
+        "primary": primary,
+        "verified": verified,
+        "visibility": "private" if primary else None,
+    }
+
+
+def invented_address() -> str:
+    """An invented address on the reserved example.invalid domain, made at run time."""
+    return "person-" + secrets.token_hex(4) + "@" + "example.invalid"
+
+
 def installation_item(installation_id: int, account_id: int, kind: str = "Organization") -> Body:
     """One entry of ``GET /user/installations``, with fields Burnbird ignores."""
     return {
@@ -84,7 +99,7 @@ def repository_item(repository_id: int, *, private: bool = True, permissions: An
 
 
 class FakeGithub:
-    """github.com's authorize and token endpoints and the three API calls sign-in makes."""
+    """github.com's authorize and token endpoints and the four API calls sign-in makes."""
 
     def __init__(self, settings: AuthSettings) -> None:
         self.settings = settings
@@ -96,6 +111,9 @@ class FakeGithub:
         self.user: Body = {"id": USER, "login": "example-person", "type": "User"}
         self.installations: list[Body] = []
         self.repositories: dict[int, list[Body]] = {}
+        self.emails: list[Body] = [email_item(invented_address())]
+        # A path whose next API answer is this response, kept for every call.
+        self.answers: dict[str, httpx2.Response] = {}
         # Changes that make the fake misbehave.
         self.page_size = 100
         self.failures: dict[str, int] = {}
@@ -158,6 +176,8 @@ class FakeGithub:
         )
 
     def _api(self, request: httpx2.Request, path: str) -> httpx2.Response:
+        if path in self.answers:
+            return self.answers[path]
         if path_status := self.failures.get(path):
             return httpx2.Response(path_status, json={"message": "Server Error"})
         if request.headers.get("authorization") != f"Bearer {self.token}":
@@ -166,11 +186,16 @@ class FakeGithub:
             return httpx2.Response(200, json=self.user)
         if path == "/user/installations":
             return self._page(request, "installations", self.installations)
+        if path == "/user/emails":
+            return self._page(request, None, self.emails)
         if match := re.fullmatch(r"/user/installations/(\d+)/repositories", path):
             return self._page(request, "repositories", self.repositories.get(int(match[1]), []))
         return httpx2.Response(404)
 
-    def _page(self, request: httpx2.Request, key: str, items: list[Body]) -> httpx2.Response:
+    def _page(
+        self, request: httpx2.Request, key: str | None, items: list[Body]
+    ) -> httpx2.Response:
+        """One page of a list: an object holding the items under ``key``, or a bare array."""
         size = min(int(request.url.params.get("per_page", "30")), self.page_size)
         page = int(request.url.params.get("page", "1"))
         headers = {}
@@ -179,11 +204,9 @@ class FakeGithub:
                 f"https://{self.link_host}{request.url.path}?per_page={size}&page={page + 1}"
             )
             headers["link"] = f'<{following}>; rel="next"'
-        return httpx2.Response(
-            200,
-            json={"total_count": len(items), key: items[(page - 1) * size : page * size]},
-            headers=headers,
-        )
+        chosen = items[(page - 1) * size : page * size]
+        body: Any = chosen if key is None else {"total_count": len(items), key: chosen}
+        return httpx2.Response(200, json=body, headers=headers)
 
 
 @dataclasses.dataclass

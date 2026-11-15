@@ -14,6 +14,9 @@ regexes = ['''(?i)@(?:users\.noreply\.github\.com|(?:[a-z0-9-]+\.)*example\.(?:c
 [[rules.allowlists]]
 description = "public role addresses of a reviewed vendor (noreply: GitHub's own merge and web-edit commits)"
 regexes = ['''(?i)^(?:support|security|noreply)@github\.com$''']
+[[rules.allowlists]]
+description = "Burnbird's own contact point, named in PRIVACY.md"
+regexes = ['''(?i)^hello@burnbird\.racingcrow\.com$''']
 
 
 [[rules]]

@@ -74,6 +74,7 @@ messages, the pull request title or its description. Its output names only the c
 | Path | Holds |
 |---|---|
 | `README.md` | What Burnbird is |
+| `PRIVACY.md` | What Burnbird stores about people, why, who else handles it, how long it is kept, and their rights; every change that stores something new updates it |
 | `pyproject.toml`, `uv.lock` | The Python project, its dev tools (exact pins) and the lint, type and test settings |
 | `.python-version` | The one Python version; `tests/test_python_version.py` keeps the other copies in step |
 | `src/burnbird/` | The application package: one folder per feature, and the shared storage modules at its root |
@@ -84,14 +85,16 @@ messages, the pull request title or its description. Its output names only the c
 | `src/burnbird/billing/counting.py` | Bills a job: its minutes after the provider's rounding, its dollars or allowance units, and the day it counts on |
 | `src/burnbird/billing/forecast.py` | An allowance's cycle, use, pace and run-out date, and its warnings as data |
 | `src/burnbird/github/` | GitHub: `router.py` takes `POST /github/webhook` (signature, then the fields of a handled event, stored once); `schemas.py` names the fields kept per event; `signature.py` checks the HMAC; `events.py` is the worker's step that turns stored deliveries into jobs, installations and deletions (an uninstall, removed repositories, a revoked authorization); `client.py` is the App's own API client (the App JWT, installation tokens, paging, retries, rate limits); `reconcile.py` is the hourly reconciliation of the stored installations and repositories with GitHub's lists, which also queues every repository never backfilled; `backfill.py` stores a queued repository's jobs since its cycle start; `redeliver.py` is the hourly redelivery of failed webhook deliveries, which re-queues the backfill for what stays lost; `schedule.py` claims a due run of a periodic task and records how it ended; `config.py` reads the App's client ID and secret files |
-| `src/burnbird/auth/` | Sign-in with GitHub: `router.py` takes `/auth/login`, `/auth/callback` and `/auth/logout`; `service.py` holds Authlib's GitHub client (state and the PKCE S256 verifier), the user's lists from GitHub and the one-transaction store; `dependencies.py` gives the signed-in user, the access filters, `account_access` (account-wide access) and the CSRF check; `config.py` reads the settings |
+| `src/burnbird/auth/` | Sign-in with GitHub: `router.py` takes `/auth/login`, `/auth/callback` and `/auth/logout`; `service.py` holds Authlib's GitHub client (state and the PKCE S256 verifier), the user's lists and primary verified email address from GitHub and the one-transaction store; `device.py` labels a session's device from the request headers; `dependencies.py` gives the signed-in user, the access filters, `account_access` (account-wide access) and the CSRF check; `config.py` reads the settings |
 | `src/burnbird/logs.py` | The commands' logging: one formatter that redacts token-shaped values, `Authorization` values, OAuth secrets and the callback's code and state |
 | `src/burnbird/web.py` | Creates the web app: the body limit and each feature's router, nothing else |
-| `src/burnbird/worker.py` | One pass of the worker: the stored deliveries, then the periodic tasks that are due (reconciliation, redelivery), then at most one repository's backfill, each step isolated |
-| `src/burnbird/models.py` | The stored tables, webhook deliveries included (their validated fields only, never the body), each user's installations and repositories from their last sign-in, the worker's periodic tasks, the repositories queued for backfill, and the redeliveries asked for |
+| `src/burnbird/worker.py` | One pass of the worker: the stored deliveries, then the periodic tasks that are due (reconciliation, redelivery), then at most one repository's backfill, then the daily purge, each step isolated |
+| `src/burnbird/purge.py` | The daily purge task: claims the run and calls `retention.run_purges` |
+| `src/burnbird/models.py` | The stored tables, webhook deliveries included (their validated fields only, never the body), each user's installations and repositories from their last sign-in, their primary verified email address, each session with its device label, the worker's periodic tasks, the repositories queued for backfill, and the redeliveries asked for |
 | `src/burnbird/database.py` | The database URL from the environment, and an engine whose connections and statements time out |
 | `src/burnbird/migrations/` | The Alembic migrations, shipped inside the package; `[tool.alembic]` in `pyproject.toml` points at them |
-| `src/burnbird/retention.py` | What is deleted and when: jobs after 90 days, deliveries after 7, expired sessions, "Delete my data", a revoked authorization, an uninstall, and repositories removed from an installation |
+| `src/burnbird/retention.py` | What is deleted and when: jobs after 90 days, deliveries after 7, expired sessions, email addresses no sign-in read in 30 days (all four through `run_purges`), "Delete my data", a revoked authorization, an uninstall, and repositories removed from an installation |
+| `tests/test_public_text.py` | Fails on any email or IP address in a tracked file that is not on its allowlist |
 | `tests/` | Its tests, in folders that mirror the feature folders (`tests/auth/`, `tests/billing/`, `tests/github/`), each with an `__init__.py` so mypy accepts the same test file name in two folders; `tests/conftest.py` gives the storage tests a migrated Postgres and rolls each test back |
 | `scripts/check-image-age.py`, `tests/test_check_image_age.py` | The image-age check and its test, vendored unchanged; `tests/test_vendored.py` holds their recorded sha256 |
 | `LICENSE` | The licence, FSL-1.1-MIT, unchanged except its copyright line |
@@ -167,6 +170,14 @@ One pull request:
   start, once per cause; a re-queue raises the row's generation, so a pass already running (or one whose lease was
   taken over) never undoes it.
 - Every code path that locks more than one repository goes through `retention.lock_repositories`, in ID order.
+- Every time limit on stored data is a purge in `retention.run_purges`, which the worker's daily `purge` task runs in
+  one transaction; a new limit is a new purge there, with a test of a row just past it and one just inside it.
+- An email address never reaches a log line, an exception message or a test's committed text. Sign-in logs say only
+  whether an address was read, and tests build invented addresses on `example.invalid` at run time.
+- A session's device label is built from `burnbird.auth.device`'s own words and a major version only; the raw
+  `User-Agent` and client-hint headers are never stored or logged.
+- No tracked file holds an email or IP address that is not on `tests/test_public_text.py`'s allowlist. A new one is a
+  reviewed change to the allowlist.
 - No job from before Delete my data is ever stored again: the account's `data_deleted_at` is set in the same
   transaction, `events.store_job` (the one path for webhooks, redeliveries and backfills) skips any job created
   before it, and a backfill never starts before it.

@@ -75,6 +75,8 @@ class Account(Base):
     github_plan: Mapped[str]
     github_cycle_day: Mapped[int] = _cycle_day()
     blacksmith_cycle_day: Mapped[int] = _cycle_day()
+    # When its user last asked to delete their data; no job created before it is stored again.
+    data_deleted_at: Mapped[datetime | None]
 
 
 class Installation(Base):
@@ -124,6 +126,8 @@ class Backfill(Base):
     attempts: Mapped[int] = mapped_column(SmallInteger, server_default=text("0"))
     # The end of the last range whose runs were all stored; the next pass starts after it.
     done_until: Mapped[datetime | None]
+    # Raised by each re-queue; a pass writes only while the generation it claimed is unchanged.
+    generation: Mapped[int] = mapped_column(Integer, server_default=text("0"))
 
 
 class Job(Base):
@@ -262,3 +266,16 @@ class WorkerTask(Base):
     name: Mapped[str] = mapped_column(primary_key=True)
     next_run_at: Mapped[datetime]
     last_success_at: Mapped[datetime | None]
+    # The last success whose gap a run already handled, so a gap is acted on once (redelivery).
+    gap_handled_for: Mapped[datetime | None]
+
+
+class RedeliveryRequest(Base):
+    """A failed webhook delivery Burnbird asked GitHub to redeliver, so it is asked only once."""
+
+    __tablename__ = "redelivery_request"
+
+    guid: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    requested_at: Mapped[datetime] = mapped_column(index=True)
+    # When its event was found lost and its repository re-queued, so that happens once.
+    requeued_at: Mapped[datetime | None]

@@ -1,9 +1,13 @@
 """The backfill: store a repository's jobs since its cycle start, from GitHub's runs and jobs.
 
 Webhooks carry each job as it completes, so the backfill fills what they cannot: the jobs of the
-current cycle from before a repository came under Burnbird. The hourly reconciliation queues every
-repository never backfilled (``queue``); the worker then backfills one queued repository per pass
-(``run_next``).
+current cycle from before a repository came under Burnbird, and those of an event that stayed lost.
+The hourly reconciliation queues every repository never backfilled (``queue``); the redelivery
+re-queues a repository whose job event was lost, and every repository after a gap longer than
+GitHub keeps deliveries (``requeue``). The worker then backfills one queued repository per pass
+(``run_next``). A re-queue clears the progress and raises the row's generation: a pass already
+running writes nothing more and stops, and the next one starts again at the cycle start. No pass
+starts before the account's ``data_deleted_at``.
 
 A pass over one repository:
 1. **Lease.** A due row is claimed with ``FOR UPDATE SKIP LOCKED`` and its ``retry_at`` moved 30
@@ -35,13 +39,14 @@ would lose jobs. A suspended installation's row waits an hour.
 """
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from pydantic import ValidationError
-from sqlalchemy import delete, func, insert, or_, select, update
+from sqlalchemy import CursorResult, Delete, delete, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird.billing.forecast import cycle
@@ -49,6 +54,7 @@ from burnbird.github import schemas
 from burnbird.github.client import GithubAnswerError, GithubApp, RateLimitedError
 from burnbird.github.events import store_job
 from burnbird.models import Account, Backfill, Installation, Repository
+from burnbird.retention import lock_repositories
 
 logger = logging.getLogger(__name__)
 
@@ -68,10 +74,17 @@ _RANGE_FORMAT: Final = "%Y-%m-%dT%H:%M:%SZ"
 
 @dataclass(frozen=True, slots=True)
 class Claimed:
-    """A leased backfill row: the repository, and how many errors have put it off so far."""
+    """A leased backfill row: the repository, how many errors have put it off, and its generation.
+
+    A pass writes its progress, put-offs and finish only while the row keeps this generation; a
+    re-queue raises it, so a pass already running never undoes the re-queue.
+    """
 
     repository_id: int
     attempts: int
+    generation: int
+    # The lease this pass holds; a pass whose lease ran out and was taken over writes nothing.
+    leased_until: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +96,8 @@ class _Target:
     suspended: bool
     since: datetime
     done_until: datetime | None
+    generation: int
+    leased_until: datetime
 
 
 class _ReserveReachedError(RateLimitedError):
@@ -125,8 +140,37 @@ def queue(session: Session) -> int:
     return len(queued.all())
 
 
+def requeue(session: Session, repository_ids: Collection[int]) -> int:
+    """Queue stored repositories again from the cycle start; return how many rows that touched.
+
+    A lost webhook event or a gap longer than GitHub keeps deliveries calls it. A repository with a
+    row has its progress cleared and its generation raised (its attempts and retry time stay), so a
+    pass already running stops and the next one starts again at the cycle start, or at the
+    account's data deletion if later. Without a row, it gets one, backfilled before or not. An ID
+    no repository has is skipped.
+    """
+    if not repository_ids:
+        return 0
+    # Repositories first, in ID order, as Delete my data locks them, so the two never deadlock.
+    lock_repositories(session, repository_ids, key_share=True)
+    touched = session.execute(
+        insert(Backfill)
+        .from_select(
+            [Backfill.repository_id],
+            select(Repository.id).where(Repository.id.in_(repository_ids)),
+        )
+        .on_conflict_do_update(
+            index_elements=[Backfill.repository_id],
+            set_={"done_until": None, "generation": Backfill.generation + 1},
+        )
+        .returning(Backfill.repository_id)
+    )
+    return len(touched.all())
+
+
 def claim(sessions: sessionmaker[Session], now: datetime) -> Claimed | None:
     """Lease the oldest due row for ``LEASE``; None when none is due or every due one is taken."""
+    leased_until = now + LEASE
     with sessions.begin() as session:
         due = (
             select(Backfill.repository_id)
@@ -139,10 +183,10 @@ def claim(sessions: sessionmaker[Session], now: datetime) -> Claimed | None:
         row = session.execute(
             update(Backfill)
             .where(Backfill.repository_id == due)
-            .values(retry_at=now + LEASE)
-            .returning(Backfill.repository_id, Backfill.attempts)
+            .values(retry_at=leased_until)
+            .returning(Backfill.repository_id, Backfill.attempts, Backfill.generation)
         ).first()
-    return None if row is None else Claimed(row[0], row[1])
+    return None if row is None else Claimed(row[0], row[1], row[2], leased_until)
 
 
 def run_next(sessions: sessionmaker[Session], github: GithubApp, now: datetime) -> bool:
@@ -168,7 +212,7 @@ def run_next(sessions: sessionmaker[Session], github: GithubApp, now: datetime) 
 def _backfill(
     sessions: sessionmaker[Session], github: GithubApp, claimed: Claimed, now: datetime
 ) -> None:
-    target = _target(sessions, claimed.repository_id, now)
+    target = _target(sessions, claimed, now)
     if target is None:
         # The repository went after the claim; its row went with it (ON DELETE CASCADE).
         return
@@ -193,8 +237,21 @@ def _backfill(
                 # The pass has done its share: due again at once, from where it stopped.
                 _put_off(sessions, claimed, now)
                 return
+    _finish(sessions, target, now)
+
+
+def _finish(sessions: sessionmaker[Session], target: _Target, now: datetime) -> None:
+    """Delete the row and mark the repository backfilled, only while this pass still holds it."""
     with sessions.begin() as session:
-        session.execute(delete(Backfill).where(Backfill.repository_id == target.repository_id))
+        finished = _count(
+            session,
+            delete(Backfill).where(
+                *_held(target.repository_id, target.generation, target.leased_until)
+            ),
+        )
+        if not finished:
+            # Re-queued or taken over meanwhile: the pass that holds it now does the finish.
+            return
         # Only under the installation it was backfilled for: a repository moved meanwhile is
         # still to be backfilled for its new account.
         session.execute(
@@ -208,7 +265,17 @@ def _backfill(
     logger.info("backfill: repository %d backfilled", target.repository_id)
 
 
-def _target(sessions: sessionmaker[Session], repository_id: int, now: datetime) -> _Target | None:
+def _held(repository_id: int, generation: int, leased_until: datetime) -> tuple[Any, ...]:
+    """Return the conditions that match the row as this pass claimed it: generation and lease."""
+    return (
+        Backfill.repository_id == repository_id,
+        Backfill.generation == generation,
+        Backfill.retry_at == leased_until,
+    )
+
+
+def _target(sessions: sessionmaker[Session], claimed: Claimed, now: datetime) -> _Target | None:
+    repository_id = claimed.repository_id
     with sessions.begin() as session:
         row = session.execute(
             select(
@@ -218,6 +285,7 @@ def _target(sessions: sessionmaker[Session], repository_id: int, now: datetime) 
                 Installation.suspended,
                 Account.github_cycle_day,
                 Account.blacksmith_cycle_day,
+                Account.data_deleted_at,
                 Backfill.done_until,
             )
             .join(Installation, Installation.id == Repository.installation_id)
@@ -227,11 +295,26 @@ def _target(sessions: sessionmaker[Session], repository_id: int, now: datetime) 
         ).first()
     if row is None:
         return None
-    installation_id, login, name, suspended, github_day, blacksmith_day, done_until = row
+    installation_id, login, name, suspended, github_day, blacksmith_day, deleted_at, done_until = (
+        row
+    )
     today = now.astimezone(UTC).date()
     start = min(cycle(today, github_day)[0], cycle(today, blacksmith_day)[0])
     since = datetime.combine(start, time(), UTC)
-    return _Target(repository_id, installation_id, login, name, suspended, since, done_until)
+    if deleted_at is not None:
+        # Never before the account's data was deleted: nothing older is fetched or stored again.
+        since = max(since, deleted_at.astimezone(UTC).replace(microsecond=0))
+    return _Target(
+        repository_id,
+        installation_id,
+        login,
+        name,
+        suspended,
+        since,
+        done_until,
+        claimed.generation,
+        claimed.leased_until,
+    )
 
 
 def _days(start: datetime, end: datetime) -> Iterator[tuple[datetime, datetime]]:
@@ -320,15 +403,23 @@ def _store_run(
             session.execute(delete(Backfill).where(Backfill.repository_id == target.repository_id))
             return False
         # Locked after the repository, in the order Delete my data locks them: once it has taken
-        # this repository out of the queue, no run stores a job for it again.
-        queued = session.scalars(
-            select(Backfill.repository_id)
+        # this repository out of the queue, this pass stops. A later re-queue (a lost event, a
+        # gap) stores only jobs created after the deletion: store_job skips the older ones.
+        queued = session.execute(
+            select(Backfill.generation, Backfill.retry_at)
             .where(Backfill.repository_id == target.repository_id)
             .with_for_update()
         ).first()
         if queued is None:
             logger.info(
                 "backfill: repository %d was dequeued while it was backfilled; stopped",
+                target.repository_id,
+            )
+            return False
+        if queued != (target.generation, target.leased_until):
+            logger.info(
+                "backfill: repository %d was re-queued or taken over while it was backfilled; "
+                "stopped",
                 target.repository_id,
             )
             return False
@@ -360,11 +451,15 @@ def _save_progress(sessions: sessionmaker[Session], target: _Target, done_until:
     with sessions.begin() as session:
         session.execute(
             update(Backfill)
-            .where(Backfill.repository_id == target.repository_id)
+            .where(*_held(target.repository_id, target.generation, target.leased_until))
             # Only forward: a worker whose lease ran out never moves a newer worker's progress
             # back.
             .values(done_until=func.greatest(Backfill.done_until, done_until))
         )
+
+
+def _count(session: Session, statement: Delete) -> int:
+    return cast(CursorResult[Any], session.execute(statement)).rowcount
 
 
 def _backoff(attempts: int) -> timedelta:
@@ -380,5 +475,7 @@ def _put_off(
         values["attempts"] = claimed.attempts + 1
     with sessions.begin() as session:
         session.execute(
-            update(Backfill).where(Backfill.repository_id == claimed.repository_id).values(values)
+            update(Backfill)
+            .where(*_held(claimed.repository_id, claimed.generation, claimed.leased_until))
+            .values(values)
         )

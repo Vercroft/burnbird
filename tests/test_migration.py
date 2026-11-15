@@ -13,6 +13,7 @@ TABLES = {
     "installation",
     "job",
     "label_size",
+    "redelivery_request",
     "repository",
     "session",
     "user_installation",

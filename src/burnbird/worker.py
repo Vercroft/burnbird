@@ -13,7 +13,7 @@ from typing import Final
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from burnbird.github import backfill, events, reconcile
+from burnbird.github import backfill, events, reconcile, redeliver
 from burnbird.github.client import GithubApp
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,7 @@ def run_once(sessions: sessionmaker[Session], github: GithubApp, now: datetime) 
         "deliveries", lambda: events.process_pending(sessions, now, DELIVERIES_PER_PASS), 0
     )
     _step("reconcile", lambda: reconcile.run(sessions, github, now), False)
+    _step("redeliver", lambda: redeliver.run(sessions, github, now), False)
     _step("backfill", lambda: backfill.run_next(sessions, github, now), False)
     return taken
 

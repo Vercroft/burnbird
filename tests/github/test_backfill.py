@@ -21,7 +21,7 @@ from sqlalchemy import Engine, delete, insert, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird import retention
-from burnbird.github import backfill, events, reconcile, schemas
+from burnbird.github import backfill, events, reconcile, redeliver, schemas
 from burnbird.github.client import API_HOST, GithubApp
 from burnbird.models import Account, Backfill, Installation, Job, Repository
 from tests.github.conftest import workflow_job_body
@@ -414,12 +414,16 @@ def test_nothing_due_claims_nothing(
 def test_a_claimed_row_is_leased_for_thirty_minutes(
     sessions: sessionmaker[Session], world: Session
 ) -> None:
-    assert backfill.claim(sessions, NOW) == backfill.Claimed(REPOSITORY, 0)
+    assert backfill.claim(sessions, NOW) == backfill.Claimed(
+        REPOSITORY, 0, 0, NOW + backfill.LEASE
+    )
     row = _row(world)
     assert row is not None
     assert row.retry_at == NOW + timedelta(minutes=30)
     assert backfill.claim(sessions, NOW + timedelta(minutes=29)) is None
-    assert backfill.claim(sessions, NOW + timedelta(minutes=30)) == backfill.Claimed(REPOSITORY, 0)
+    assert backfill.claim(sessions, NOW + timedelta(minutes=30)) == backfill.Claimed(
+        REPOSITORY, 0, 0, NOW + timedelta(minutes=30) + backfill.LEASE
+    )
 
 
 # Limits and errors.
@@ -613,7 +617,9 @@ def test_two_workers_never_take_the_same_row(engine: Engine) -> None:
         with engine.connect() as first, engine.connect() as second:
             held = first.begin()
             first_sessions = sessionmaker(bind=first, join_transaction_mode="create_savepoint")
-            assert backfill.claim(first_sessions, NOW) == backfill.Claimed(5901, 0)
+            assert backfill.claim(first_sessions, NOW) == backfill.Claimed(
+                5901, 0, 0, NOW + backfill.LEASE
+            )
             # Without SKIP LOCKED this would wait for the lock and fail after a second.
             second.execute(text("SET lock_timeout = '1s'"))
             second.commit()
@@ -1015,7 +1021,9 @@ def test_progress_never_moves_back(world: Session, sessions: sessionmaker[Sessio
     later = datetime(2026, 11, 12, 23, 59, 59, tzinfo=UTC)
     world.get_one(Backfill, REPOSITORY).done_until = later
     world.flush()
-    target = backfill._target(sessions, REPOSITORY, NOW)
+    claimed = backfill.claim(sessions, NOW)
+    assert claimed is not None
+    target = backfill._target(sessions, claimed, NOW)
     assert target is not None
     # A worker whose lease ran out finishes an older range after a newer worker moved on.
     backfill._save_progress(sessions, target, datetime(2026, 11, 10, 23, 59, 59, tzinfo=UTC))
@@ -1063,7 +1071,7 @@ def test_a_row_dequeued_by_another_transaction_mid_run_stores_nothing(
     sessions = sessionmaker(bind=engine)
     try:
         claimed = backfill.claim(sessions, NOW)
-        assert claimed == backfill.Claimed(5931, 0)
+        assert claimed == backfill.Claimed(5931, 0, 0, NOW + backfill.LEASE)
         with engine.connect() as other, ThreadPoolExecutor(max_workers=1) as pool:
             held = other.begin()
             other.execute(text("DELETE FROM backfill WHERE repository_id = 5931"))
@@ -1079,3 +1087,330 @@ def test_a_row_dequeued_by_another_transaction_mid_run_stores_nothing(
         app.close()
         with engine.begin() as connection:
             connection.execute(delete(Account).where(Account.id == 3931))
+
+
+# Re-queueing (lost events and the gap rule) and the generation that keeps it from being undone.
+
+
+def _first_range(github: FakeGithub) -> str:
+    return github.run_requests()[0].url.params["created"].split("..")[0]
+
+
+def test_a_requeue_clears_progress_and_keeps_the_rest(world: Session) -> None:
+    row = world.get_one(Backfill, REPOSITORY)
+    row.done_until = datetime(2026, 11, 12, 23, 59, 59, tzinfo=UTC)
+    row.attempts, row.retry_at = 2, NOW + timedelta(minutes=8)
+    world.flush()
+    assert backfill.requeue(world, [REPOSITORY]) == 1
+    world.expire_all()
+    row = world.get_one(Backfill, REPOSITORY)
+    assert (row.done_until, row.generation, row.attempts, row.retry_at) == (
+        None,
+        1,
+        2,
+        NOW + timedelta(minutes=8),
+    )
+
+
+def test_a_requeue_queues_a_backfilled_repository_and_never_an_unknown_one(
+    world: Session,
+) -> None:
+    world.execute(delete(Backfill))
+    world.get_one(Repository, REPOSITORY).backfilled_at = NOW - timedelta(days=2)
+    world.flush()
+    assert backfill.requeue(world, [REPOSITORY, 5999]) == 1
+    world.expire_all()
+    [row] = list(world.scalars(select(Backfill)))
+    assert (row.repository_id, row.done_until, row.generation) == (REPOSITORY, None, 0)
+
+
+def test_a_requeued_backfill_starts_again_at_the_cycle_start(
+    sessions: sessionmaker[Session], world: Session, app: GithubApp, github: FakeGithub
+) -> None:
+    world.get_one(Backfill, REPOSITORY).done_until = datetime(2026, 11, 12, 23, 59, 59, tzinfo=UTC)
+    world.flush()
+    backfill.requeue(world, [REPOSITORY])
+    assert _run(sessions, app) is True
+    assert _first_range(github) == "2026-11-10T00:00:00Z"
+
+
+def test_a_backfill_never_starts_before_the_account_s_data_was_deleted(
+    sessions: sessionmaker[Session], world: Session, app: GithubApp, github: FakeGithub
+) -> None:
+    world.get_one(Account, ORG).data_deleted_at = datetime(2026, 11, 12, 10, 0, tzinfo=UTC)
+    world.flush()
+    backfill.requeue(world, [REPOSITORY])
+    assert _run(sessions, app) is True
+    assert _first_range(github) == "2026-11-12T10:00:00Z"
+
+
+def test_a_requeue_during_a_running_pass_is_not_undone(
+    sessions: sessionmaker[Session],
+    world: Session,
+    app: GithubApp,
+    github: FakeGithub,
+    clock: list[datetime],
+) -> None:
+    # A lost event re-queues the repository while the pass lists its first day.
+    github.hooks["runs"] = lambda: _requeued(world)
+    assert _run(sessions, app) is True
+    row = _row(world)
+    assert row is not None
+    # The old pass wrote no progress and did not finish: the re-queue stands.
+    assert (row.done_until, row.generation) == (None, 1)
+    assert _backfilled_at(world) is None
+    later = NOW + timedelta(minutes=30)
+    clock[0] = later
+    github.requests.clear()
+    assert _run(sessions, app, later) is True
+    assert _first_range(github) == "2026-11-10T00:00:00Z"
+    assert _row(world) is None
+    assert _backfilled_at(world) == later
+
+
+def _requeued(session: Session) -> None:
+    backfill.requeue(session, [REPOSITORY])
+
+
+def test_a_requeue_while_a_run_is_stored_stops_the_pass(
+    sessions: sessionmaker[Session],
+    world: Session,
+    app: GithubApp,
+    github: FakeGithub,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    github.runs[REPOSITORY] = [run_item(701, "2026-11-12T09:00:00Z")]
+    github.jobs = {701: [job_item(9001, 701)]}
+    github.hooks["jobs:701"] = lambda: _requeued(world)
+    assert _run(sessions, app) is True
+    assert _jobs(world) == set()
+    assert (
+        "backfill: repository 5001 was re-queued or taken over while it was backfilled; stopped"
+        in caplog.text
+    )
+
+
+def test_a_pass_with_an_unchanged_generation_saves_progress_and_finishes(
+    sessions: sessionmaker[Session],
+    world: Session,
+    app: GithubApp,
+    github: FakeGithub,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Re-queued once before the pass: the pass claims that generation and works as before.
+    backfill.requeue(world, [REPOSITORY])
+    monkeypatch.setattr(backfill, "RUNS_PER_PASS", 1)
+    github.runs[REPOSITORY] = [
+        run_item(701, "2026-11-10T09:00:00Z"),
+        run_item(702, "2026-11-11T09:00:00Z"),
+    ]
+    github.jobs = {701: [job_item(9001, 701)], 702: [job_item(9002, 702)]}
+    assert _run(sessions, app) is True
+    row = _row(world)
+    assert row is not None
+    assert (row.done_until, row.generation) == (datetime(2026, 11, 10, 23, 59, 59, tzinfo=UTC), 1)
+    monkeypatch.setattr(backfill, "RUNS_PER_PASS", 200)
+    assert _run(sessions, app) is True
+    assert _row(world) is None
+    assert _backfilled_at(world) == NOW
+    assert _jobs(world) == {(9001, 1), (9002, 1)}
+
+
+def test_a_lost_job_event_s_backfill_finds_a_job_of_a_run_created_days_before(
+    sessions: sessionmaker[Session], world: Session, app: GithubApp, github: FakeGithub
+) -> None:
+    # The repository was backfilled; then a job of a run created on the 10th completed on the
+    # 14th, and its delivery and our redelivery both failed.
+    world.execute(delete(Backfill))
+    world.get_one(Repository, REPOSITORY).backfilled_at = NOW - timedelta(days=4)
+    world.flush()
+    guid = "00000000-0000-0000-0000-000000000077"
+    deliveries = [
+        {
+            "id": 31,
+            "guid": guid,
+            "delivered_at": "2026-11-14T10:00:00Z",
+            "redelivery": False,
+            "status_code": 502,
+            "event": "workflow_job",
+            "installation_id": INSTALLATION,
+            "repository_id": REPOSITORY,
+        },
+        {
+            "id": 32,
+            "guid": guid,
+            "delivered_at": "2026-11-14T11:30:00Z",
+            "redelivery": True,
+            "status_code": 502,
+            "event": "workflow_job",
+            "installation_id": INSTALLATION,
+            "repository_id": REPOSITORY,
+        },
+    ]
+    github.override = lambda request: (
+        httpx2.Response(200, json=deliveries)
+        if request.url.path == "/app/hook/deliveries"
+        else None
+    )
+    github.runs[REPOSITORY] = [run_item(701, "2026-11-10T08:00:00Z")]
+    github.jobs = {701: [job_item(9001, 701)]}
+    assert redeliver.redeliver(sessions, app, NOW, NOW - timedelta(hours=1)) is True
+    assert _run(sessions, app) is True
+    assert _jobs(world) == {(9001, 1)}
+
+
+def test_a_backfilled_job_created_before_the_account_s_deletion_is_not_stored(
+    sessions: sessionmaker[Session], world: Session, app: GithubApp, github: FakeGithub
+) -> None:
+    # The run is listed (created after the deletion), but its job was created before it.
+    world.get_one(Account, ORG).data_deleted_at = datetime(2026, 11, 13, 12, 0, tzinfo=UTC)
+    world.flush()
+    github.runs[REPOSITORY] = [run_item(701, "2026-11-13T13:00:00Z")]
+    github.jobs = {701: [job_item(9001, 701)]}
+    assert _run(sessions, app) is True
+    assert _jobs(world) == set()
+
+
+def test_a_pass_whose_lease_was_taken_over_never_undoes_a_requeue(
+    sessions: sessionmaker[Session], world: Session, app: GithubApp, github: FakeGithub
+) -> None:
+    old = backfill.claim(sessions, NOW)
+    assert old is not None
+    old_target = backfill._target(sessions, old, NOW)
+    assert old_target is not None
+    # Its lease runs out; another pass takes the row over and finishes it.
+    later = NOW + backfill.LEASE
+    assert _run(sessions, app, later) is True
+    assert _row(world) is None
+    # A lost event re-queues it: the new row starts at generation 0 again.
+    backfill.requeue(world, [REPOSITORY])
+    # The old pass comes back and writes its progress and its finish: both change nothing.
+    backfill._save_progress(sessions, old_target, datetime(2026, 11, 12, 23, 59, 59, tzinfo=UTC))
+    backfill._finish(sessions, old_target, NOW)
+    row = _row(world)
+    assert row is not None
+    assert (row.done_until, row.generation) == (None, 0)
+
+
+def test_a_requeue_waits_for_delete_my_data_instead_of_deadlocking(engine: Engine) -> None:
+    # Two connections need committed rows; they are deleted again at the end. One connection
+    # does Delete my data's steps in its order: it locks both repositories, and after a re-queue
+    # has started, deletes their queued rows. The re-queue, locking the repositories first, waits.
+    with engine.begin() as connection:
+        connection.execute(
+            insert(Account).values(
+                id=7981, login="example-7981", type="User", github_plan="GitHub Free"
+            )
+        )
+        connection.execute(insert(Installation).values(id=4981, account_id=7981, created_at=NOW))
+        for repository_id in (5981, 5982):
+            connection.execute(
+                insert(Repository).values(
+                    id=repository_id, installation_id=4981, name="app", private=True
+                )
+            )
+        # One repository is queued, the other not.
+        connection.execute(insert(Backfill).values(repository_id=5981))
+    try:
+        with engine.connect() as deleting, ThreadPoolExecutor(max_workers=1) as pool:
+            held = deleting.begin()
+            deleting.execute(text("SET LOCAL lock_timeout = '3s'"))
+            deleting.execute(
+                text("SELECT id FROM repository WHERE id IN (5981, 5982) ORDER BY id FOR UPDATE")
+            )
+
+            def requeue() -> int:
+                with sessionmaker(bind=engine).begin() as session:
+                    session.execute(text("SET LOCAL lock_timeout = '3s'"))
+                    return backfill.requeue(session, [5981, 5982])
+
+            requeuing = pool.submit(requeue)
+            time.sleep(0.5)
+            deleting.execute(text("DELETE FROM backfill WHERE repository_id IN (5981, 5982)"))
+            held.commit()
+            assert requeuing.result(timeout=10) == 2
+    finally:
+        with engine.begin() as connection:
+            connection.execute(delete(Account).where(Account.id == 7981))
+
+
+def test_a_run_of_a_pass_whose_lease_was_taken_over_stores_nothing(
+    sessions: sessionmaker[Session], world: Session, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    old = backfill.claim(sessions, NOW)
+    assert old is not None
+    old_target = backfill._target(sessions, old, NOW)
+    assert old_target is not None
+    # Its lease runs out and another pass takes the row over, with the same generation.
+    assert backfill.claim(sessions, NOW + backfill.LEASE) is not None
+    job = schemas.WorkflowJob.model_validate(job_item(9001, 701))
+    assert backfill._store_run(sessions, old_target, [job]) is False
+    assert _jobs(world) == set()
+    assert "re-queued or taken over while it was backfilled; stopped" in caplog.text
+
+
+def _wait_for_lock_waits(engine: Engine, count: int) -> None:
+    """Wait, at most 10 seconds, until ``count`` sessions of the test database wait on a lock."""
+    for _ in range(100):
+        # A fresh connection each time: a transaction keeps its first view of the activity.
+        with engine.connect() as watching:
+            waiting = watching.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity"
+                    " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                )
+            )
+        if waiting is not None and waiting >= count:
+            return
+        time.sleep(0.1)
+    raise AssertionError(f"fewer than {count} sessions waited on a lock")
+
+
+def test_delete_my_data_locks_repositories_in_the_order_a_requeue_does(engine: Engine) -> None:
+    # Two connections need committed rows; they are deleted again at the end. Twelve
+    # repositories are stored in a scrambled order, so a query without ORDER BY returns them in
+    # an order of the plan's choosing, on the pinned Postgres not ID order. A third connection
+    # holds the highest; Delete my data starts and waits for it, then a re-queue starts and waits
+    # too. Locking in ID order, the re-queue waits behind Delete my data; in the plan's order,
+    # the pair deadlocks.
+    scrambled = [5990, 5985, 5994, 5988, 5996, 5986, 5992, 5989, 5995, 5987, 5993, 5991]
+    with engine.begin() as connection:
+        connection.execute(
+            insert(Account).values(
+                id=7985, login="example-7985", type="User", github_plan="GitHub Free"
+            )
+        )
+        connection.execute(insert(Installation).values(id=4985, account_id=7985, created_at=NOW))
+        for repository_id in scrambled:
+            connection.execute(
+                insert(Repository).values(
+                    id=repository_id, installation_id=4985, name="app", private=True
+                )
+            )
+    try:
+        with engine.connect() as holding, ThreadPoolExecutor(max_workers=2) as pool:
+            held = holding.begin()
+            holding.execute(text("SELECT id FROM repository WHERE id = 5996 FOR UPDATE"))
+
+            def delete_mine() -> None:
+                with sessionmaker(bind=engine).begin() as session:
+                    session.execute(text("SET LOCAL lock_timeout = '5s'"))
+                    retention.delete_my_data(session, 7985)
+
+            def requeue() -> int:
+                with sessionmaker(bind=engine).begin() as session:
+                    session.execute(text("SET LOCAL lock_timeout = '5s'"))
+                    return backfill.requeue(session, sorted(scrambled))
+
+            deleting = pool.submit(delete_mine)
+            _wait_for_lock_waits(engine, 1)
+            requeuing = pool.submit(requeue)
+            _wait_for_lock_waits(engine, 2)
+            held.commit()
+            deleting.result(timeout=15)
+            assert requeuing.result(timeout=15) == len(scrambled)
+    finally:
+        with engine.begin() as connection:
+            connection.execute(delete(Account).where(Account.id == 7985))

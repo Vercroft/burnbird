@@ -18,6 +18,7 @@ from burnbird.database import database_url, make_engine
 from burnbird.github import config
 from burnbird.github import router as github
 from burnbird.github.router import WebhookState
+from burnbird.security_headers import SecurityHeadersMiddleware
 
 # The largest request body accepted: about 100 job events, or an installation event that lists
 # about 7,400 repositories. GitHub caps a payload at 25 MB. A larger body gets 413, refused on its
@@ -29,7 +30,7 @@ MAX_BODY_BYTES: Final = 1024 * 1024
 def create_app(
     webhook_secret: bytes, sessions: sessionmaker[Session], auth_settings: AuthSettings
 ) -> FastAPI:
-    """Create the app with its body limit, the OAuth state cookie and every router."""
+    """Create the app with its security headers, body limit, OAuth state cookie and routers."""
     # No generated API pages: the site serves only its own pages and loads nothing from elsewhere.
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(RequestBodyLimitMiddleware, max_body_size=MAX_BODY_BYTES)
@@ -44,6 +45,8 @@ def create_app(
         same_site="lax",
         https_only=True,
     )
+    # Added last, so it is the outermost of these and its headers reach every answer they give.
+    app.add_middleware(SecurityHeadersMiddleware)
     app.state.webhook = WebhookState(webhook_secret, sessions)
     app.state.auth = AuthState(
         auth_settings, sessions, github_oauth(auth_settings), lambda: datetime.now(UTC)

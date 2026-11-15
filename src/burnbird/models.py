@@ -103,6 +103,27 @@ class Repository(Base):
     )
     name: Mapped[str]
     private: Mapped[bool]
+    # When a backfill last stored this repository's jobs since its cycle start; None until then.
+    backfilled_at: Mapped[datetime | None]
+
+
+class Backfill(Base):
+    """A repository queued for a backfill of its jobs since the cycle start.
+
+    A worker leases a due row by moving ``retry_at`` forward; ``attempts`` counts the errors that
+    put it off, never the rate limits; ``done_until`` is how far it got. See
+    ``burnbird.github.backfill``.
+    """
+
+    __tablename__ = "backfill"
+
+    repository_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("repository.id", ondelete="CASCADE"), primary_key=True
+    )
+    retry_at: Mapped[datetime | None]
+    attempts: Mapped[int] = mapped_column(SmallInteger, server_default=text("0"))
+    # The end of the last range whose runs were all stored; the next pass starts after it.
+    done_until: Mapped[datetime | None]
 
 
 class Job(Base):

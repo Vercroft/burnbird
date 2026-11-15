@@ -1,6 +1,7 @@
 """The worker command's work: one pass over everything that is due.
 
-A pass takes the stored webhook deliveries first, then the periodic tasks that are due. Each step
+A pass takes the stored webhook deliveries first, then the periodic tasks that are due, then at
+most one repository's backfill. Each step
 is an isolation point: a failure is logged and the next step still runs, so one broken step never
 stops the others. The loop that repeats passes belongs to the worker command.
 """
@@ -12,7 +13,7 @@ from typing import Final
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from burnbird.github import events, reconcile
+from burnbird.github import backfill, events, reconcile
 from burnbird.github.client import GithubApp
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ def run_once(sessions: sessionmaker[Session], github: GithubApp, now: datetime) 
         "deliveries", lambda: events.process_pending(sessions, now, DELIVERIES_PER_PASS), 0
     )
     _step("reconcile", lambda: reconcile.run(sessions, github, now), False)
+    _step("backfill", lambda: backfill.run_next(sessions, github, now), False)
     return taken
 
 

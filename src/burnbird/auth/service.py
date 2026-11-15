@@ -33,6 +33,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird.auth.config import AuthSettings
+from burnbird.email.preferences import write_defaults
 from burnbird.github import schemas
 from burnbird.github.client import (
     API_HEADERS,
@@ -259,7 +260,8 @@ def store_sign_in(
     repositories not stored yet are added, and the session the request came with (if any) is
     replaced by a new one, labelled with ``device``. The stored email address is replaced by the
     one GitHub gave, or deleted when it gave none; it is kept as it was when GitHub's answer could
-    not be read. A failure stores nothing.
+    not be read. A stored address writes the default email choices the user has none for yet.
+    A failure stores nothing.
     """
     session_id = secrets.token_urlsafe(32)
     user_id = sign_in.user_id
@@ -320,6 +322,8 @@ def _store_email(session: Session, user_id: int, address: str | None, now: datet
             index_elements=[UserEmail.user_id], set_={"address": address, "read_at": now}
         )
     )
+    # The first stored address brings the default email choices; later ones keep the user's.
+    write_defaults(session, user_id, now)
 
 
 def _insert(

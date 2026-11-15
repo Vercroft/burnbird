@@ -13,6 +13,8 @@ from burnbird.github import backfill
 from burnbird.models import (
     Account,
     Base,
+    EmailConsent,
+    EmailPreference,
     GithubUser,
     Installation,
     Job,
@@ -98,6 +100,35 @@ def _email(user: int, read_at: datetime) -> UserEmail:
     # Invented, on the reserved example.invalid domain.
     return UserEmail(
         user_id=user, address=f"user-{user}" + "@" + "example.invalid", read_at=read_at
+    )
+
+
+def _choices(user: int) -> list[EmailPreference | EmailConsent]:
+    """One user's three email choices and a consent row for each."""
+    return [
+        *(
+            EmailPreference(user_id=user, kind=kind, enabled=False, updated_at=RECENT)
+            for kind in ("usage_warnings", "weekly_summary", "news")
+        ),
+        *(
+            EmailConsent(
+                user_id=user,
+                kind=kind,
+                enabled=False,
+                source="default",
+                text_version="0" * 12,
+                at=RECENT,
+            )
+            for kind in ("usage_warnings", "weekly_summary", "news")
+        ),
+    ]
+
+
+def _email_rows(session: Session, user: int) -> tuple[int, int]:
+    session.expire_all()
+    return (
+        len(session.scalars(select(EmailPreference).where(EmailPreference.user_id == user)).all()),
+        len(session.scalars(select(EmailConsent).where(EmailConsent.user_id == user)).all()),
     )
 
 
@@ -275,6 +306,20 @@ def test_delete_my_data_removes_the_user_s_email_address(world: Session) -> None
     before = _rows(world)
     assert delete_my_data(world, PERSON).user_emails == 1
     assert _deleted(before, _rows(world))["user_email"] == {(PERSON,)}
+
+
+@pytest.mark.parametrize(
+    "remove", [delete_my_data, revoke_authorization], ids=["delete my data", "revoke"]
+)
+def test_the_user_s_email_choices_and_consent_rows_go_with_them(
+    world: Session, remove: Callable[[Session, int], Deleted]
+) -> None:
+    world.add_all([*_choices(PERSON), *_choices(MEMBER)])
+    world.flush()
+    deleted = remove(world, PERSON)
+    assert (deleted.email_preferences, deleted.email_consents) == (3, 3)
+    assert _email_rows(world, PERSON) == (0, 0)
+    assert _email_rows(world, MEMBER) == (3, 3)
 
 
 def test_delete_my_data_marks_when_the_personal_account_s_data_was_deleted(

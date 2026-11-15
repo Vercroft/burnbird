@@ -17,6 +17,8 @@ When you sign in with GitHub:
 | Your GitHub user ID and login, and when you last signed in | To know who you are | Signing in |
 | The installations of the App and the repositories you could see at your last sign-in, and whether you had admin on each | To show you only what you may see | The pages and their access rules |
 | Your GitHub primary email address, if GitHub marks it verified, and when a sign-in last read it | To send you run-out warnings and service notices, which start in a later release | Email about your CI minutes |
+| Your email choices: whether you want run-out warnings (on unless you turn them off), and two kinds not sent yet (a weekly summary and news, both off) | To honour your choice | Sending run-out warnings only while you want them |
+| A record of each choice: which kind, on or off, where it came from (the default, or your own change), when, and which version of the wording you saw | To prove what you chose and when | Showing your choice if it is ever questioned |
 | For each signed-in session: a SHA-256 of its random ID (never the ID itself), when it started and when it ends, and a short label of the device, such as "Firefox 140 on Linux, computer" | To keep you signed in, and so you can recognise your own sessions | Staying signed in |
 
 For each GitHub account or organisation the App is installed on:
@@ -55,6 +57,7 @@ turn the warnings off. News about Burnbird will be sent only if you ask for it.
 | A session | until it ends, 8 hours after sign-in, or you sign out |
 | Your email address | 30 days after the last sign-in that read it, then deleted; a sign-in reads it again |
 | Your user record and access lists | until you delete your data or revoke the App's authorization on GitHub |
+| Your email choices and their records | until you delete your data or revoke the App's authorization on GitHub |
 | An account's data | until the App is uninstalled from it |
 
 Expired data is deleted once a day. Database backups keep deleted data until they are replaced by newer backups.
@@ -62,11 +65,11 @@ Expired data is deleted once a day. Database backups keep deleted data until the
 ## Your rights, and how to use them
 
 - **See what is stored:** this page lists it. Write to the contact point for a copy of what we hold about you.
-- **Erase it:** "Delete my data" removes your user record, your email address, your sessions and your access lists,
-  and the jobs of your personal account. Its page comes in a later release; until then, write to the contact point.
-  Revoking the App's authorization on GitHub deletes your user record, email address, sessions and access lists as
-  soon as GitHub tells us. Uninstalling the App deletes everything stored for that account. An organisation's data belongs to the
-  organisation, so it goes when the App is uninstalled from it.
+- **Erase it:** "Delete my data" removes your user record, your email address and choices and their records, your
+  sessions and your access lists, and the jobs of your personal account. Its page comes in a later release; until
+  then, write to the contact point. Revoking the App's authorization on GitHub deletes the same, except the jobs, as
+  soon as GitHub tells us. Uninstalling the App deletes everything stored for that account. An organisation's data
+  belongs to the organisation, so it goes when the App is uninstalled from it.
 - **Stop email:** none is sent yet. When it starts, each warning will carry a one-click unsubscribe link.
 - **Ask a question:** write to hello@burnbird.racingcrow.com.
 - **Complain:** you can complain to the data protection authority where you live; in India, the Data Protection

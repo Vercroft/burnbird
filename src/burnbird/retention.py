@@ -18,6 +18,8 @@ from sqlalchemy.orm import Session
 from burnbird.models import (
     Account,
     Backfill,
+    EmailConsent,
+    EmailPreference,
     GithubUser,
     Installation,
     Job,
@@ -52,6 +54,8 @@ class Deleted:
     accounts: int = 0
     sessions: int = 0
     user_emails: int = 0
+    email_preferences: int = 0
+    email_consents: int = 0
     users: int = 0
 
 
@@ -125,7 +129,7 @@ def lock_repositories(
 
 
 def delete_my_data(session: Session, user_id: int) -> Deleted:
-    """Delete a user, their email address, sessions and access lists, and their personal jobs.
+    """Delete a user, their email address and choices, sessions, access lists and personal jobs.
 
     The personal account is the account with the user's own ID and type ``User``. Its repository
     rows are locked first, in ID order as a re-queue locks them, and before the queued row or the
@@ -165,7 +169,7 @@ def delete_my_data(session: Session, user_id: int) -> Deleted:
 
 
 def revoke_authorization(session: Session, user_id: int) -> Deleted:
-    """Delete a user who revoked the App's authorization: address, sessions and access lists.
+    """Delete a user who revoked the App's authorization: address, choices, sessions, lists.
 
     Revoking does not uninstall the App, so every account's job data stays; it goes on uninstall.
     A user who is not stored deletes nothing.
@@ -232,6 +236,12 @@ def _user_rows(session: Session, user_id: int) -> dict[str, int]:
             session, delete(UserRepository).where(UserRepository.user_id == user_id)
         ),
         "user_emails": _count(session, delete(UserEmail).where(UserEmail.user_id == user_id)),
+        "email_preferences": _count(
+            session, delete(EmailPreference).where(EmailPreference.user_id == user_id)
+        ),
+        "email_consents": _count(
+            session, delete(EmailConsent).where(EmailConsent.user_id == user_id)
+        ),
         "users": _count(session, delete(GithubUser).where(GithubUser.id == user_id)),
     }
 

@@ -4,7 +4,9 @@
 <h2>Email</h2>
 {% if data.address %}
 <p>Your address: {{ data.address }}, read from GitHub on {{ read_at }}.</p>
+{% if data.warnings %}
 <p>Warnings continue until {{ warnings_until }}. Sign in to keep them.</p>
+{% endif %}
 {% else %}
 <p>Burnbird has no email address for you. It stores your GitHub primary address when GitHub marks it verified and lets Burnbird read it. To get run-out warnings by email, approve Burnbird's 'Email addresses' permission on GitHub if asked, then sign in again.</p>
 {% endif %}

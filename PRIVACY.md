@@ -37,8 +37,8 @@ browser sends to describe itself.
 ## Why we may use it
 
 Everything above is used to provide the service you signed up for: showing your CI minutes and when they run out.
-Run-out warnings and service notices by email, when they start, are part of that service, and you will be able to
-turn the warnings off. News about Burnbird will be sent only if you ask for it.
+Run-out warnings and service notices by email, when they start, are part of that service, and you can turn the
+warnings off with the switch on your "Your data" page (/you). News about Burnbird will be sent only if you ask for it.
 
 ## Who else handles it
 

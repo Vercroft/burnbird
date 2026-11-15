@@ -4,16 +4,18 @@ Every address is invented on example.invalid at run time; logins and IDs are inv
 """
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
 import httpx2
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from burnbird.auth.config import AuthSettings
 from burnbird.auth.service import SESSION_COOKIE
 from burnbird.email import consent
 from burnbird.models import (
@@ -27,6 +29,7 @@ from burnbird.models import (
 from tests.auth.conftest import (
     INSTALLATION,
     ORG,
+    OTHER_ORG,
     USER,
     Clock,
     FakeGithub,
@@ -41,6 +44,15 @@ type SignIn = Callable[[], httpx2.Response]
 ORIGIN: Final = "https://burnbird.test"
 NOW: Final = datetime(2026, 11, 15, 9, 0, tzinfo=UTC)
 FIREFOX: Final = "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"
+# A second, invented user in another browser, whose rows must stay untouched and unseen.
+OTHER_USER: Final = 7002
+OTHER_LOGIN: Final = "example-other-person"
+EDGE: Final = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141"
+    + ".0" * 3
+    + " Safari/537.36 Edg/141"
+    + ".0" * 3
+)
 NO_ADDRESS: Final = (
     "Burnbird has no email address for you. It stores your GitHub primary address when GitHub "
     "marks it verified and lets Burnbird read it. To get run-out warnings by email, approve "
@@ -72,6 +84,40 @@ def signed_in(client: TestClient, sign_in: SignIn, address: str) -> str:
     client.headers["user-agent"] = FIREFOX
     assert sign_in().status_code == 303
     return _csrf(client)
+
+
+@pytest.fixture
+def other_user(app: FastAPI, github: FakeGithub, auth_settings: AuthSettings) -> Iterator[str]:
+    """Sign a second user in from their own browser and account; yield their address."""
+    theirs = invented_address()
+    kept = (github.user, github.emails, github.installations, github.repositories)
+    github.user = {"id": OTHER_USER, "login": OTHER_LOGIN, "type": "User"}
+    github.emails = [email_item(theirs)]
+    github.installations = [installation_item(INSTALLATION[OTHER_ORG], OTHER_ORG)]
+    github.repositories = {INSTALLATION[OTHER_ORG]: [repository_item(5002)]}
+    with TestClient(app, base_url=auth_settings.origin, follow_redirects=False) as browser:
+        browser.headers["user-agent"] = EDGE
+        github_sign_in(browser, github)
+        github.user, github.emails, github.installations, github.repositories = kept
+        yield theirs
+
+
+# Each table that holds a user's rows, and the column naming the user.
+_OWNED: Final = {
+    "github_user": GithubUser.id,
+    "user_email": UserEmail.user_id,
+    "session": UserSession.user_id,
+    "email_preference": EmailPreference.user_id,
+    "email_consent": EmailConsent.user_id,
+}
+
+
+def _rows_of(session: Session, user: int) -> dict[str, int]:
+    session.expire_all()
+    return {
+        name: len(session.execute(select(column).where(column == user)).all())
+        for name, column in _OWNED.items()
+    }
 
 
 def _csrf(client: TestClient) -> str:
@@ -133,6 +179,16 @@ def test_the_page_lists_what_is_stored(
     assert 'href="https://github.com/Vercroft/burnbird/blob/main/PRIVACY.md"' in response.text
     assert 'name="usage_warnings" value="on" checked' in response.text
     assert NO_ADDRESS not in text
+
+
+def test_the_page_shows_nothing_of_another_user(
+    client: TestClient, other_user: str, signed_in: str
+) -> None:
+    text = _text(client.get("/you").text)
+    assert other_user not in text
+    assert "Edge 141" not in text
+    assert f"example-{OTHER_ORG}" not in text
+    assert text.count(", signed in on ") == 1
 
 
 def test_only_the_run_out_warnings_switch_is_shown(client: TestClient, signed_in: str) -> None:
@@ -215,6 +271,16 @@ def test_each_change_writes_one_consent_row_and_a_repeat_none(
     assert 'name="usage_warnings" value="on" checked' in client.get("/you").text
 
 
+def test_with_warnings_off_the_page_promises_no_warnings(
+    client: TestClient, signed_in: str
+) -> None:
+    assert "Warnings continue until" in client.get("/you").text
+    _save(client, signed_in, on=False)
+    html = client.get("/you").text
+    assert "Warnings continue until" not in html
+    assert 'name="usage_warnings" value="on">' in html
+
+
 def test_a_later_sign_in_never_resets_a_choice(
     client: TestClient, github: FakeGithub, signed_in: str, session: Session
 ) -> None:
@@ -252,22 +318,37 @@ def test_the_switch_needs_the_session_s_token_and_this_site(
 
 
 def test_delete_my_data_removes_everything_and_ends_the_session(
-    client: TestClient, signed_in: str, session: Session
+    client: TestClient,
+    app: FastAPI,
+    github: FakeGithub,
+    other_user: str,
+    signed_in: str,
+    session: Session,
 ) -> None:
+    # The same user in a second browser: that session goes too.
+    with TestClient(app, base_url=ORIGIN, follow_redirects=False) as second:
+        github_sign_in(second, github)
+    assert _rows_of(session, USER)["session"] == 2
+    others_before = _rows_of(session, OTHER_USER)
     response = client.post(
         "/you/delete", data={"csrf_token": signed_in}, headers={"Origin": ORIGIN}
     )
     assert response.status_code == 303
     assert response.headers["location"] == "/you/deleted"
-    assert (
-        "Max-Age=0" in response.headers["set-cookie"] or "1970" in response.headers["set-cookie"]
-    )
-    assert SESSION_COOKIE in response.headers["set-cookie"]
-    session.expire_all()
-    for table in (GithubUser, UserEmail, UserSession):
-        assert session.scalars(select(table)).all() == []
-    assert _choices(session) == {}
-    assert _consents(session) == []
+    cookie = response.headers["set-cookie"]
+    assert cookie.startswith(f"{SESSION_COOKIE}=")
+    assert "Max-Age=0" in cookie or "1970" in cookie
+    attributes = {part.strip().lower() for part in cookie.split(";")}
+    assert {"secure", "path=/", "httponly"} <= attributes
+    assert _rows_of(session, USER) == dict.fromkeys(others_before, 0)
+    assert _rows_of(session, OTHER_USER) == others_before
+    assert others_before == {
+        "github_user": 1,
+        "user_email": 1,
+        "session": 1,
+        "email_preference": 3,
+        "email_consent": 3,
+    }
     page = client.get("/you/deleted")
     assert page.status_code == 200
     assert "Your data is deleted" in page.text
@@ -276,9 +357,9 @@ def test_delete_my_data_removes_everything_and_ends_the_session(
 
 @pytest.mark.parametrize("origin", [ORIGIN, "https://example.com"], ids=["no token", "other site"])
 def test_delete_my_data_needs_the_session_s_token_and_this_site(
-    origin: str, client: TestClient, signed_in: str, session: Session
+    origin: str, client: TestClient, other_user: str, signed_in: str, session: Session
 ) -> None:
+    before = (_rows_of(session, USER), _rows_of(session, OTHER_USER))
     data = {} if origin == ORIGIN else {"csrf_token": signed_in}
     assert client.post("/you/delete", data=data, headers={"Origin": origin}).status_code == 403
-    session.expire_all()
-    assert session.get(GithubUser, USER) is not None
+    assert (_rows_of(session, USER), _rows_of(session, OTHER_USER)) == before

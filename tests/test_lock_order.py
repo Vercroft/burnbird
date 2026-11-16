@@ -15,17 +15,21 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx2
 import pytest
-from sqlalchemy import Connection, Engine, delete, event, insert, select
+from joserfc.jwk import RSAKey
+from sqlalchemy import Connection, Engine, delete, event, insert, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird import retention
 from burnbird.auth.service import ListedRepository, SignIn, session_digest, store_sign_in
 from burnbird.email.preferences import set_choice
-from burnbird.github import backfill, schemas
+from burnbird.github import backfill, reconcile, schemas
+from burnbird.github.client import GithubApp
 from burnbird.github.events import store_job
 from burnbird.models import (
     Account,
+    Backfill,
     EmailPreference,
     GithubUser,
     Installation,
@@ -36,6 +40,8 @@ from burnbird.models import (
     UserRepository,
     UserSession,
 )
+from tests.github import fakes
+from tests.github.fakes import FakeGithub, installation_item, repository_item
 
 NOW = datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
 
@@ -450,6 +456,234 @@ def _stored(engine: Engine, installation: schemas.Installation, *repository_ids:
                     id=repository_id, installation_id=installation.id, name="app", private=True
                 )
             )
+
+
+@pytest.fixture
+def github_app(rsa_key: RSAKey) -> Iterator[tuple[FakeGithub, GithubApp]]:
+    """A fake api.github.com and the real App client that calls it."""
+    github = FakeGithub()
+    ticks = iter(range(10**6))
+    app = GithubApp(
+        "Iv23.example",
+        rsa_key,
+        transport=httpx2.MockTransport(github.handle),
+        clock=lambda: fakes.NOW,
+        monotonic=lambda: float(next(ticks)),
+        sleep=lambda _: None,
+    )
+    yield github, app
+    app.close()
+
+
+def _lists(github: FakeGithub, *installations: schemas.Installation) -> None:
+    github.installations = [
+        installation_item(i.id, kind=i.account.type, account_id=i.account.id)
+        for i in installations
+    ]
+
+
+def _reconciles(app: GithubApp) -> Path:
+    def run(sessions: sessionmaker[Session]) -> None:
+        reconcile.reconcile(sessions, app, NOW)
+
+    return run
+
+
+def _inserts(table: str, row_id: int) -> Callable[[str, Any], bool]:
+    """Match the insert or upsert of one row."""
+    return lambda statement, parameters: (
+        statement.startswith(f"INSERT INTO {table} ") and parameters.get("id") == row_id
+    )
+
+
+def test_the_reconciliation_and_a_sign_in_storing_new_repositories(
+    engine: Engine, cleanup: list[int], github_app: tuple[FakeGithub, GithubApp]
+) -> None:
+    # GitHub lists two new repositories in another order than their IDs. Both paths insert them;
+    # an insert waits for another's uncommitted row with the same key. Paused before the second.
+    github, app = github_app
+    user_id, organisation_id, first, second = 7971, 7972, 7973, 7974
+    cleanup.extend([user_id, organisation_id])
+    installation = _installation(4972, organisation_id, "Organization")
+    _stored(engine, installation)
+    _lists(github, installation)
+    github.repositories = {installation.id: [repository_item(second), repository_item(first)]}
+    sign_in = _sign_in(
+        user_id, (installation,), (installation.id, first), (installation.id, second)
+    )
+
+    _race(engine, _reconciles(app), _inserts("repository", first), _signs_in(sign_in))
+
+    with Session(engine) as check:
+        assert check.get(Repository, first) is not None
+
+
+def test_the_reconciliation_removing_a_repository_and_delete_my_data(
+    engine: Engine, cleanup: list[int], github_app: tuple[FakeGithub, GithubApp]
+) -> None:
+    # GitHub no longer lists the lower repository. Paused at the first lock that takes it: the
+    # reconciliation's own, before it stores anything, or, without that, the removal's, after
+    # it stored the higher one.
+    github, app = github_app
+    user_id, lower, higher = 7975, 7976, 7977
+    cleanup.append(user_id)
+    installation = _installation(4975, user_id, "User")
+    _stored(engine, installation, lower, higher)
+    _lists(github, installation)
+    github.repositories = {installation.id: [repository_item(higher)]}
+
+    _race(
+        engine,
+        _reconciles(app),
+        lambda statement, parameters: (
+            statement.startswith("SELECT repository.id")
+            and "FOR UPDATE" in statement
+            and lower in parameters.values()
+        ),
+        _delete_my_data(user_id),
+    )
+
+    with Session(engine) as check:
+        assert check.get(Repository, lower) is None
+
+
+def test_the_reconciliation_and_a_sign_in_storing_new_accounts(
+    engine: Engine, cleanup: list[int], github_app: tuple[FakeGithub, GithubApp]
+) -> None:
+    # GitHub lists two new installations in another order than their accounts' IDs. Paused before
+    # the second account is inserted.
+    github, app = github_app
+    user_id, first, second = 7978, 7979, 7980
+    cleanup.extend([user_id, first, second])
+    installations = (
+        _installation(4980, second, "Organization"),
+        _installation(4979, first, "Organization"),
+    )
+    _lists(github, *installations)
+
+    _race(
+        engine,
+        _reconciles(app),
+        _inserts("account", first),
+        _signs_in(_sign_in(user_id, installations)),
+    )
+
+    with Session(engine) as check:
+        assert check.get(Account, first) is not None
+
+
+def test_the_reconciliation_uninstalling_a_higher_account_and_a_sign_in(
+    engine: Engine, cleanup: list[int], github_app: tuple[FakeGithub, GithubApp]
+) -> None:
+    # The higher account's installation is gone; the sign-in still lists it. Paused after the
+    # uninstall and before the lower account is stored.
+    github, app = github_app
+    user_id, lower, higher = 7981, 7982, 7983
+    cleanup.extend([user_id, lower, higher])
+    listed = _installation(4982, lower, "Organization")
+    gone = _installation(4983, higher, "Organization")
+    _stored(engine, listed)
+    _stored(engine, gone)
+    _lists(github, listed)
+
+    _race(
+        engine,
+        _reconciles(app),
+        _inserts("account", lower),
+        _signs_in(_sign_in(user_id, (listed, gone))),
+    )
+
+    with Session(engine) as check:
+        assert check.get(Account, lower) is not None
+
+
+def test_the_reconciliation_uninstalling_two_installations_and_a_sign_in(
+    engine: Engine, cleanup: list[int], github_app: tuple[FakeGithub, GithubApp]
+) -> None:
+    # Two installations are gone; the sign-in still lists the first and the second's repository.
+    # Paused as the second uninstall starts, after the first one locked its account.
+    github, app = github_app
+    user_id, kept_id, first_id, second_id = 7984, 7985, 7986, 7987
+    cleanup.extend([user_id, kept_id, first_id, second_id])
+    kept = _installation(4985, kept_id, "Organization")
+    first = _installation(4986, first_id, "Organization")
+    second = _installation(4987, second_id, "Organization")
+    _stored(engine, kept)
+    _stored(engine, first, 7988)
+    _stored(engine, second, 7989)
+    _lists(github, kept)
+
+    _race(
+        engine,
+        _reconciles(app),
+        lambda statement, parameters: (
+            statement.startswith("SELECT installation.account_id")
+            and second.id in parameters.values()
+        ),
+        _signs_in(_sign_in(user_id, (first, second), (second.id, 7989))),
+    )
+
+    with Session(engine) as check:
+        # The sign-in waited for both uninstalls, then stored its own list again.
+        assert check.get(Installation, first.id) is not None
+
+
+def test_the_backfill_queue_delete_my_data_and_a_sign_in(
+    engine: Engine, cleanup: list[int]
+) -> None:
+    # The higher repository is stored first, so the queue's foreign-key checks lock it first. The
+    # sign-in holds it (FOR NO KEY UPDATE), so Delete my data, holding the lower one, waits for it;
+    # the queue's FOR KEY SHARE does not wait for the sign-in.
+    user_id, lower, higher = 7990, 7991, 7992
+    cleanup.append(user_id)
+    installation = _installation(4990, user_id, "User")
+    _stored(engine, installation, higher, lower)
+    with engine.connect() as connection:
+        order = connection.scalars(
+            select(Repository.id).where(Repository.id.in_([lower, higher])).order_by(text("ctid"))
+        ).all()
+    assert order == [higher, lower]
+
+    _race(
+        engine,
+        _signs_in(_sign_in(user_id, (installation,), (installation.id, higher))),
+        "INSERT INTO account",
+        _delete_my_data(user_id),
+        _transaction(backfill.queue),
+    )
+
+    with Session(engine) as check:
+        # Delete my data marked both backfilled before the queue read them.
+        assert not check.scalars(select(Backfill).where(Backfill.repository_id == lower)).all()
+
+
+def test_a_backfill_finish_and_delete_my_data(
+    engine: Engine, cleanup: list[int], github_app: tuple[FakeGithub, GithubApp]
+) -> None:
+    # The repository has no runs, so the pass finishes: it deletes its queued row, then marks the
+    # repository backfilled; paused between the two.
+    github, app = github_app
+    user_id, repository_id = 7993, 7994
+    cleanup.append(user_id)
+    installation = _installation(4993, user_id, "User")
+    _stored(engine, installation, repository_id)
+    with engine.begin() as connection:
+        connection.execute(insert(Backfill).values(repository_id=repository_id))
+    github.override = lambda request: (
+        httpx2.Response(200, json={"total_count": 0, "workflow_runs": []})
+        if request.url.path.endswith("/actions/runs")
+        else None
+    )
+
+    _race(
+        engine,
+        lambda sessions: backfill.run_next(sessions, app, NOW),
+        "UPDATE repository",
+        _delete_my_data(user_id),
+    )
+
+    with Session(engine) as check:
+        assert check.get_one(Account, user_id).data_deleted_at is not None
 
 
 def test_a_sign_in_uninstalling_a_stale_installation_a_requeue_and_delete_my_data(

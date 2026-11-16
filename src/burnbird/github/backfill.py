@@ -28,7 +28,8 @@ A pass over one repository:
 5. **Progress.** After each range, ``done_until`` records its end. A pass stops at the first range
    that ends after ``RUNS_PER_PASS`` runs, due again at once, so it stays inside its lease and a
    busy repository still finishes over several passes.
-6. **Finish.** The row is deleted and ``repository.backfilled_at`` set, in one transaction.
+6. **Finish.** The repository is locked, then the row deleted and ``repository.backfilled_at``
+   set, in one transaction.
 
 Limits and errors: when the installation's quota (one whose reset has not passed) falls under 10%
 of its limit, the rest is kept for the hourly tasks and the backfill waits for the reset. A rate
@@ -124,17 +125,16 @@ def queue(session: Session) -> int:
     However a repository was first stored (a sign-in, a job's webhook, the reconciliation), it is
     queued once, and never again after its backfill finished.
     """
+    never = select(Repository.id).where(
+        Repository.backfilled_at.is_(None),
+        ~select(Backfill.repository_id).where(Backfill.repository_id == Repository.id).exists(),
+    )
+    # FOR KEY SHARE, the lock the inserts' foreign keys take anyway, but in ID order, as Delete my
+    # data locks them, rather than in the order the rows are read.
+    lock_repositories(session, never, lock="KEY SHARE")
     queued = session.execute(
         insert(Backfill)
-        .from_select(
-            [Backfill.repository_id],
-            select(Repository.id).where(
-                Repository.backfilled_at.is_(None),
-                ~select(Backfill.repository_id)
-                .where(Backfill.repository_id == Repository.id)
-                .exists(),
-            ),
-        )
+        .from_select([Backfill.repository_id], never)
         .returning(Backfill.repository_id)
     )
     return len(queued.all())
@@ -243,6 +243,8 @@ def _backfill(
 def _finish(sessions: sessionmaker[Session], target: _Target, now: datetime) -> None:
     """Delete the row and mark the repository backfilled, only while this pass still holds it."""
     with sessions.begin() as session:
+        # The repository before its queued row, in the order Delete my data locks them.
+        lock_repositories(session, [target.repository_id], lock="NO KEY UPDATE")
         finished = _count(
             session,
             delete(Backfill).where(

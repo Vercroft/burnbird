@@ -40,7 +40,7 @@ from typing import Any, Final
 
 import httpx2
 from pydantic import ValidationError
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird import retention
@@ -52,7 +52,7 @@ from burnbird.github.client import (
     RateLimitedError,
 )
 from burnbird.github.events import store_installation, store_repository
-from burnbird.models import Installation, Repository
+from burnbird.models import Account, Installation, Repository
 
 logger = logging.getLogger(__name__)
 
@@ -221,12 +221,33 @@ def _store_installations(
     """
     written: set[int] = set()
     with sessions.begin() as session:
+        # In the lock order (``retention.lock_repositories``): every gone installation's
+        # repositories, then every account this run uninstalls or stores, in ID order, before
+        # anything is written. Accounts are stored in ID order too, so new ones are inserted in it.
+        retention.lock_repositories(
+            session,
+            select(Repository.id).where(Repository.installation_id.in_(gone)),
+            lock="UPDATE",
+        )
+        session.execute(
+            select(Account.id)
+            .where(
+                or_(
+                    Account.id.in_([i.account.id for i in listed.installations]),
+                    Account.id.in_(
+                        select(Installation.account_id).where(Installation.id.in_(gone))
+                    ),
+                )
+            )
+            .order_by(Account.id)
+            .with_for_update()
+        ).all()
         for installation_id in sorted(gone):
             retention.uninstall(session, installation_id)
         rows = session.execute(select(Installation.id, Installation.account_id))
         present = {installation_id: account_id for installation_id, account_id in rows}
         accounts = {account_id: installation_id for installation_id, account_id in present.items()}
-        for installation in listed.installations:
+        for installation in sorted(listed.installations, key=lambda i: i.account.id):
             other = accounts.get(installation.account.id, installation.id)
             if installation.id in stored and installation.id not in present:
                 logger.warning(
@@ -284,6 +305,9 @@ def _reconcile_repositories(
         )
     gone = stored - {repository.id for repository in listed}
     with sessions.begin() as session:
+        # In the lock order (``retention.lock_repositories``): every repository this writes or
+        # deletes, in ID order, first; new ones are inserted in ID order too.
+        retention.lock_repositories(session, {r.id for r in listed} | gone, lock="UPDATE")
         # The same rule as for installations: a row deleted or moved during the fetch is newer
         # than the list, so the list does not bring it back.
         if (
@@ -308,7 +332,7 @@ def _reconcile_repositories(
                 installation_id,
                 changed,
             )
-        for repository in listed:
+        for repository in sorted(listed, key=lambda r: r.id):
             if repository.id not in changed:
                 store_repository(session, installation_id, repository)
         if gone and not listed:

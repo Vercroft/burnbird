@@ -171,12 +171,12 @@ def lock_repositories(
     Rows a path inserts follow the same order, in ID order. Without the ORDER BY here the order
     would be whatever the query plan yields; a bulk DELETE or UPDATE has no order of its own, so
     a path locks its rows with a separate statement first. Delete my data, a sign-in (a stale
-    installation's uninstall included), ``store_job``, an uninstall, a removal, the daily purge's
-    sessions and email addresses, and a re-queue follow it. Known exceptions, fixed next: the
-    reconciliation stores accounts and repositories in GitHub's order and uninstalls one
-    installation at a time; the backfill ``queue`` takes FOR KEY SHARE on repositories in the
-    plan's order; a backfill run's finish deletes its queued row before it updates the
-    repository; and the daily purge deletes old jobs without their repositories' locks.
+    installation's uninstall included), ``store_job``, an uninstall, a removal, the
+    reconciliation, a backfill run, the backfill queue, a re-queue and the daily purge's sessions
+    and email addresses follow it. One known exception is left: the daily purge deletes old jobs
+    without their repositories' locks, so its DELETE and another path's DELETE of the same jobs
+    (Delete my data, an uninstall or a removal) can lock them in different orders. Both are
+    single statements, so no test pauses between their rows yet; it is tracked as its own issue.
     """
     read, key_share = _FOR_UPDATE[lock]
     session.execute(

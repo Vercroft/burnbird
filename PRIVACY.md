@@ -37,8 +37,8 @@ browser sends to describe itself.
 ## Why we may use it
 
 Everything above is used to provide the service you signed up for: showing your CI minutes and when they run out.
-Run-out warnings and service notices by email, when they start, are part of that service, and you will be able to
-turn the warnings off. News about Burnbird will be sent only if you ask for it.
+Run-out warnings and service notices by email, when they start, are part of that service, and you can turn the
+warnings off with the switch on your "Your data" page (/you). News about Burnbird will be sent only if you ask for it.
 
 ## Who else handles it
 
@@ -64,13 +64,16 @@ Expired data is deleted once a day. Database backups keep deleted data until the
 
 ## Your rights, and how to use them
 
-- **See what is stored:** this page lists it. Write to the contact point for a copy of what we hold about you.
-- **Erase it:** "Delete my data" removes your user record, your email address and choices and their records, your
-  sessions and your access lists, and the jobs of your personal account. Its page comes in a later release; until
-  then, write to the contact point. Revoking the App's authorization on GitHub deletes the same, except the jobs, as
-  soon as GitHub tells us. Uninstalling the App deletes everything stored for that account. An organisation's data
-  belongs to the organisation, so it goes when the App is uninstalled from it.
-- **Stop email:** none is sent yet. When it starts, each warning will carry a one-click unsubscribe link.
+- **See what is stored:** this page lists it, and your "Your data" page on the site (/you) shows your address, your
+  choices, your sessions and the accounts you can see. Write to the contact point for a copy of what we hold about
+  you.
+- **Erase it:** "Delete my data" on your "Your data" page removes your user record, your email address and choices
+  and their records, your sessions and your access lists, and the jobs of your personal account. Revoking the App's
+  authorization on GitHub deletes the same, except the jobs, as soon as GitHub tells us. Uninstalling the App deletes
+  everything stored for that account. An organisation's data belongs to the organisation, so it goes when the App is
+  uninstalled from it.
+- **Stop email:** turn run-out warnings off on your "Your data" page. None is sent yet; when sending starts, each
+  warning will also carry a one-click unsubscribe link.
 - **Ask a question:** write to hello@burnbird.racingcrow.com.
 - **Complain:** you can complain to the data protection authority where you live; in India, the Data Protection
   Board of India.

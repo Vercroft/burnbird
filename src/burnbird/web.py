@@ -10,6 +10,7 @@ from starlette.middleware.body_limit import RequestBodyLimitMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from burnbird import logs
+from burnbird.account import router as account
 from burnbird.auth import router as auth
 from burnbird.auth.config import AuthSettings, settings_from_environment
 from burnbird.auth.dependencies import AuthState
@@ -53,6 +54,7 @@ def create_app(
     )
     app.include_router(github.router)
     app.include_router(auth.router)
+    app.include_router(account.router)
     return app
 
 

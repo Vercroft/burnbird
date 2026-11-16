@@ -1,4 +1,4 @@
-"""Every answer carries the security headers, redirects and errors included."""
+"""Every answer carries the security headers: a page, a redirect, and errors."""
 
 import secrets
 
@@ -28,12 +28,23 @@ def client(sessions: sessionmaker[Session], auth_settings: AuthSettings) -> Test
 @pytest.mark.parametrize(
     ("method", "path", "status"),
     [
+        ("GET", "/you/deleted", 200),
+        ("GET", "/you", 303),
         ("GET", "/auth/callback", 303),
         ("GET", "/no-such-page", 404),
+        ("POST", "/you/delete", 403),
         ("POST", "/auth/logout", 403),
         ("POST", "/github/webhook", 403),
     ],
-    ids=["redirect", "not found", "refused post", "unsigned webhook"],
+    ids=[
+        "page",
+        "redirect to sign in",
+        "sign-in redirect",
+        "not found",
+        "refused delete",
+        "refused sign-out",
+        "unsigned webhook",
+    ],
 )
 def test_every_answer_carries_the_headers_once(
     client: TestClient, method: str, path: str, status: int

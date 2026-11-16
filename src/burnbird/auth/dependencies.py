@@ -212,6 +212,14 @@ async def csrf_protected(request: Request) -> None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "the form is out of date")
 
 
+async def posted_form(request: Request) -> dict[str, list[str]]:
+    """Return a POST's form fields, parsed with the standard library as ``csrf_protected`` does.
+
+    Each field maps to every value sent for it, so a handler can refuse a repeated field.
+    """
+    return parse_qs((await request.body()).decode("utf-8", "replace"))
+
+
 def _token(session_id: str) -> str:
     digest = hmac.new(session_id.encode(), _CSRF_MESSAGE, hashlib.sha256).digest()
     return base64.urlsafe_b64encode(digest).decode().rstrip("=")

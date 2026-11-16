@@ -85,8 +85,10 @@ messages, the pull request title or its description. Its output names only the c
 | `src/burnbird/billing/counting.py` | Bills a job: its minutes after the provider's rounding, its dollars or allowance units, and the day it counts on |
 | `src/burnbird/billing/forecast.py` | An allowance's cycle, use, pace and run-out date, and its warnings as data |
 | `src/burnbird/github/` | GitHub: `router.py` takes `POST /github/webhook` (signature, then the fields of a handled event, stored once); `schemas.py` names the fields kept per event; `signature.py` checks the HMAC; `events.py` is the worker's step that turns stored deliveries into jobs, installations and deletions (an uninstall, removed repositories, a revoked authorization); `client.py` is the App's own API client (the App JWT, installation tokens, paging, retries, rate limits); `reconcile.py` is the hourly reconciliation of the stored installations and repositories with GitHub's lists, which also queues every repository never backfilled; `backfill.py` stores a queued repository's jobs since its cycle start; `redeliver.py` is the hourly redelivery of failed webhook deliveries, which re-queues the backfill for what stays lost; `schedule.py` claims a due run of a periodic task and records how it ended; `config.py` reads the App's client ID and secret files |
-| `src/burnbird/auth/` | Sign-in with GitHub: `router.py` takes `/auth/login`, `/auth/callback` and `/auth/logout`; `service.py` holds Authlib's GitHub client (state and the PKCE S256 verifier), the user's lists and primary verified email address from GitHub and the one-transaction store; `device.py` labels a session's device from the request headers; `dependencies.py` gives the signed-in user, the access filters, `account_access` (account-wide access) and the CSRF check; `config.py` reads the settings |
+| `src/burnbird/auth/` | Sign-in with GitHub: `router.py` takes `/auth/login`, `/auth/callback` and `/auth/logout`; `service.py` holds Authlib's GitHub client (state and the PKCE S256 verifier), the user's lists and primary verified email address from GitHub and the one-transaction store; `device.py` labels a session's device from the request headers; `dependencies.py` gives the signed-in user, the access filters, `account_access` (account-wide access), the CSRF check and a POST's form fields; `config.py` reads the settings |
+| `src/burnbird/account/` | The signed-in user's own data: `router.py` takes `GET /you` (the "Your data" page), `POST /you/email` (the run-out warnings switch), `POST /you/delete` (Delete my data) and `GET /you/deleted`; `service.py` reads what the page shows; `templates/` holds its pages |
 | `src/burnbird/email/` | Email choices: `preferences.py` writes each user's defaults once and records every change; `consent.txt` is the consent wording shown next to the switch, and `consent.py` gives it and its version (the start of its SHA-256) |
+| `src/burnbird/templates.py`, `src/burnbird/templates/` | The one Jinja2 environment (autoescape on for `.html`, templates shipped in the package) and the shared base layout |
 | `src/burnbird/security_headers.py` | The security headers every answer carries |
 | `src/burnbird/logs.py` | The commands' logging: one formatter that redacts token-shaped values, `Authorization` values, OAuth secrets and the callback's code and state |
 | `src/burnbird/web.py` | Creates the web app: the security headers, the body limit and each feature's router, nothing else |
@@ -97,7 +99,7 @@ messages, the pull request title or its description. Its output names only the c
 | `src/burnbird/migrations/` | The Alembic migrations, shipped inside the package; `[tool.alembic]` in `pyproject.toml` points at them |
 | `src/burnbird/retention.py` | What is deleted and when: jobs after 90 days, deliveries after 7, expired sessions, email addresses no sign-in read in 30 days (all four through `run_purges`), "Delete my data", a revoked authorization, an uninstall, and repositories removed from an installation |
 | `tests/test_public_text.py` | Fails on any email or IP address in a tracked file that is not on its allowlist |
-| `tests/` | Its tests, in folders that mirror the feature folders (`tests/auth/`, `tests/billing/`, `tests/email/`, `tests/github/`), each with an `__init__.py` so mypy accepts the same test file name in two folders; `tests/conftest.py` gives the storage tests a migrated Postgres and rolls each test back |
+| `tests/` | Its tests, in folders that mirror the feature folders (`tests/account/`, `tests/auth/`, `tests/billing/`, `tests/email/`, `tests/github/`), each with an `__init__.py` so mypy accepts the same test file name in two folders; `tests/conftest.py` gives the storage tests a migrated Postgres and rolls each test back |
 | `scripts/check-image-age.py`, `tests/test_check_image_age.py` | The image-age check and its test, vendored unchanged; `tests/test_vendored.py` holds their recorded sha256 |
 | `LICENSE` | The licence, FSL-1.1-MIT, unchanged except its copyright line |
 | `SECURITY.md` | How to report a vulnerability |
@@ -178,7 +180,11 @@ One pull request:
   whether an address was read, and tests build invented addresses on `example.invalid` at run time.
 - Every answer carries `Content-Security-Policy: default-src 'self'; script-src 'self'; frame-ancestors 'none';
   form-action 'self'; base-uri 'none'`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: same-origin`
-  (`burnbird.security_headers`); `tests/test_security_headers.py` checks them on redirects and error answers.
+  (`burnbird.security_headers`); `tests/test_security_headers.py` checks them on a page, redirects and error answers.
+  Templates hold no script, no inline style and no event handler attribute, and load nothing from another site;
+  `tests/test_templates.py` checks every template.
+- Every POST depends on `csrf_protected`, except the ones `tests/test_csrf_boundary.py` lists with their reason; a new
+  exemption is a reviewed change there.
 - Consent rows (`email_consent`) are append-only: a choice is changed in `email_preference` and recorded as a new
   consent row, never by updating or deleting one, except when the user's data is deleted. A user's default choices
   are written once, when their first address is stored, and never reset. A changed `email/consent.txt` is a new

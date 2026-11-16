@@ -172,11 +172,13 @@ def lock_repositories(
     would be whatever the query plan yields; a bulk DELETE or UPDATE has no order of its own, so
     a path locks its rows with a separate statement first. Delete my data, a sign-in (a stale
     installation's uninstall included), ``store_job``, an uninstall, a removal, the
-    reconciliation, a backfill run, the backfill queue, a re-queue and the daily purge's sessions
-    and email addresses follow it. One known exception is left: the daily purge deletes old jobs
-    without their repositories' locks, so its DELETE and another path's DELETE of the same jobs
-    (Delete my data, an uninstall or a removal) can lock them in different orders. Both are
-    single statements, so no test pauses between their rows yet; it is tracked as its own issue.
+    reconciliation, a backfill run, the backfill queue's and a re-queue's locks, and the daily
+    purge's sessions and email addresses follow it. Two known exceptions are left, each a single
+    statement that no test can pause between its rows yet, tracked as one issue: the daily purge
+    deletes old jobs without their repositories' locks, so its DELETE and another path's DELETE
+    of the same jobs (Delete my data, an uninstall or a removal) can lock them in different
+    orders; and the backfill queue and a re-queue insert queued rows in the order they read them,
+    so the two at once can each wait for the other's new row.
     """
     read, key_share = _FOR_UPDATE[lock]
     session.execute(

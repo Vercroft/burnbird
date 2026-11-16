@@ -152,7 +152,7 @@ def requeue(session: Session, repository_ids: Collection[int]) -> int:
     if not repository_ids:
         return 0
     # Repositories first, in ID order, as Delete my data locks them, so the two never deadlock.
-    lock_repositories(session, repository_ids, key_share=True)
+    lock_repositories(session, repository_ids, lock="KEY SHARE")
     touched = session.execute(
         insert(Backfill)
         .from_select(

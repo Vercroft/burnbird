@@ -7,10 +7,11 @@ purge; the worker's daily ``burnbird.purge`` task calls it.
 """
 
 import logging
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Final, cast
+from types import MappingProxyType
+from typing import Any, Final, Literal, cast
 
 from sqlalchemy import CursorResult, Delete, Select, delete, func, select, update
 from sqlalchemy.orm import Session
@@ -110,21 +111,46 @@ def purge_stale_emails(session: Session, now: datetime) -> int:
     return _count(session, delete(UserEmail).where(UserEmail.read_at < cutoff))
 
 
+# PostgreSQL's row-level lock modes that ``lock_repositories`` takes, weakest last; FOR UPDATE
+# conflicts with all three, FOR NO KEY UPDATE with itself and FOR UPDATE, FOR KEY SHARE with FOR
+# UPDATE only (https://www.postgresql.org/docs/18/explicit-locking.html#LOCKING-ROWS).
+type RowLock = Literal["UPDATE", "NO KEY UPDATE", "KEY SHARE"]
+# SQLAlchemy's ``with_for_update`` arguments (read, key_share) for each.
+_FOR_UPDATE: Final[Mapping[RowLock, tuple[bool, bool]]] = MappingProxyType(
+    {"UPDATE": (False, False), "NO KEY UPDATE": (False, True), "KEY SHARE": (True, True)}
+)
+
+
 def lock_repositories(
-    session: Session, repository_ids: Collection[int] | Select[int], *, key_share: bool
+    session: Session, repository_ids: Collection[int] | Select[int], *, lock: RowLock
 ) -> None:
     """Lock the stored repositories with these IDs in ID order, until the transaction ends.
 
-    The rule: every code path that locks more than one repository goes through this function,
-    so they all take the locks in one order and none waits on another in the opposite order (a
-    deadlock). Without the ORDER BY the order would be whatever the query plan yields. The locks
-    are FOR UPDATE, or FOR KEY SHARE when ``key_share`` is true; both conflict with FOR UPDATE.
+    The lock order. Every path takes the rows it locks in this order, and only the steps it needs,
+    so no two paths wait on each other in opposite orders (a deadlock):
+
+    1. repositories, in ID order, through this function;
+    2. accounts, in ID order, with their installations;
+    3. the user row;
+    4. the user's own rows (sessions, access lists, email address and choices), whose order
+       among themselves the user row lock makes safe.
+
+    Rows a path inserts follow the same order, in ID order. Without the ORDER BY here the order
+    would be whatever the query plan yields. Delete my data, a sign-in, ``store_job``, a backfill
+    run and a re-queue follow it. Known exceptions, fixed next: ``uninstall`` and
+    ``remove_repositories`` delete repositories in the plan's order; the reconciliation stores
+    accounts and repositories in GitHub's order and uninstalls one installation at a time; the
+    backfill ``queue`` takes FOR KEY SHARE on repositories in the plan's order;
+    ``store_installation`` uninstalls a stale installation after an account is locked; and the
+    daily purge deletes sessions and then email addresses without the user row lock, while a
+    sign-in writes the email address before it deletes its old session.
     """
+    read, key_share = _FOR_UPDATE[lock]
     session.execute(
         select(Repository.id)
         .where(Repository.id.in_(repository_ids))
         .order_by(Repository.id)
-        .with_for_update(read=key_share, key_share=key_share)
+        .with_for_update(read=read, key_share=key_share)
     ).all()
 
 
@@ -148,7 +174,7 @@ def delete_my_data(session: Session, user_id: int) -> Deleted:
     repositories = _repositories(personal)
     # Repository rows first, as a backfill run takes them, and in ID order, as a re-queue takes
     # them.
-    lock_repositories(session, repositories, key_share=False)
+    lock_repositories(session, repositories, lock="UPDATE")
     # Then the account (the order store_job takes them): from now on no job created before this
     # moment is stored again, by any path.
     session.execute(
@@ -226,6 +252,14 @@ def remove_repositories(
 
 
 def _user_rows(session: Session, user_id: int) -> dict[str, int]:
+    # The user row before the user's own rows, in the lock order (``lock_repositories``), so a
+    # sign-in that holds the user row is waited for. FOR NO KEY UPDATE, the lock a sign-in's upsert
+    # takes, not FOR UPDATE: an email choice's save holds its choice's row and then takes FOR KEY
+    # SHARE on the user row for its consent row; FOR UPDATE would block that while this waits for
+    # the choice's row, a deadlock.
+    session.execute(
+        select(GithubUser.id).where(GithubUser.id == user_id).with_for_update(key_share=True)
+    ).all()
     # A dict keeps insertion order, so children go before their parents here too.
     return {
         "sessions": _count(session, delete(UserSession).where(UserSession.user_id == user_id)),

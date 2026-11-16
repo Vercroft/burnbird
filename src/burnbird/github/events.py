@@ -175,7 +175,9 @@ def store_repository(
 def store_installation(session: Session, installation: schemas.Installation) -> None:
     """Store an installation and its account; a repeat leaves a stored one as it is.
 
-    The webhook's ``installation.created`` and a sign-in's list of installations both use it.
+    The webhook's ``installation.created`` and a sign-in's list of installations both use it. A
+    sign-in locks a stale installation's repositories before any account, so the uninstall here
+    keeps the lock order (``retention.lock_repositories``).
     """
     account = installation.account
     # An account holds one installation. Another one stored for it means its "deleted" delivery

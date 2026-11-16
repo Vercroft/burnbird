@@ -13,7 +13,17 @@ from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import Any, Final, Literal, cast
 
-from sqlalchemy import CursorResult, Delete, Select, delete, func, select, update
+from sqlalchemy import (
+    ColumnElement,
+    CursorResult,
+    Delete,
+    Select,
+    delete,
+    func,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.orm import Session
 
 from burnbird.models import (
@@ -72,9 +82,25 @@ class Purged:
 
 def run_purges(session: Session, now: datetime) -> Purged:
     """Run every time-based purge in the caller's transaction, and log one line of counts."""
+    jobs = purge_jobs(session, now)
+    deliveries = purge_deliveries(session, now)
+    # The owners' user rows before their sessions and addresses, in ID order, in the lock order
+    # (``lock_repositories``): a sign-in or Delete my data that holds one is waited for. FOR NO
+    # KEY UPDATE, as ``_user_rows`` takes it.
+    session.execute(
+        select(GithubUser.id)
+        .where(
+            or_(
+                GithubUser.id.in_(select(UserSession.user_id).where(_expired(now))),
+                GithubUser.id.in_(select(UserEmail.user_id).where(_stale(now))),
+            )
+        )
+        .order_by(GithubUser.id)
+        .with_for_update(key_share=True)
+    ).all()
     purged = Purged(
-        jobs=purge_jobs(session, now),
-        deliveries=purge_deliveries(session, now),
+        jobs=jobs,
+        deliveries=deliveries,
         sessions=purge_sessions(session, now),
         emails=purge_stale_emails(session, now),
     )
@@ -102,13 +128,20 @@ def purge_deliveries(session: Session, now: datetime) -> int:
 
 def purge_sessions(session: Session, now: datetime) -> int:
     """Delete the sessions that have expired at ``now``; return how many."""
-    return _count(session, delete(UserSession).where(UserSession.expires_at <= _aware(now)))
+    return _count(session, delete(UserSession).where(_expired(now)))
 
 
 def purge_stale_emails(session: Session, now: datetime) -> int:
     """Delete the addresses no sign-in read in the 30 days before ``now``; return how many."""
-    cutoff = _aware(now) - EMAIL_FRESHNESS
-    return _count(session, delete(UserEmail).where(UserEmail.read_at < cutoff))
+    return _count(session, delete(UserEmail).where(_stale(now)))
+
+
+def _expired(now: datetime) -> ColumnElement[bool]:
+    return UserSession.expires_at <= _aware(now)
+
+
+def _stale(now: datetime) -> ColumnElement[bool]:
+    return UserEmail.read_at < _aware(now) - EMAIL_FRESHNESS
 
 
 # PostgreSQL's row-level lock modes that ``lock_repositories`` takes, weakest last; FOR UPDATE
@@ -136,14 +169,14 @@ def lock_repositories(
        among themselves the user row lock makes safe.
 
     Rows a path inserts follow the same order, in ID order. Without the ORDER BY here the order
-    would be whatever the query plan yields. Delete my data, a sign-in, ``store_job``, a backfill
-    run and a re-queue follow it. Known exceptions, fixed next: ``uninstall`` and
-    ``remove_repositories`` delete repositories in the plan's order; the reconciliation stores
-    accounts and repositories in GitHub's order and uninstalls one installation at a time; the
-    backfill ``queue`` takes FOR KEY SHARE on repositories in the plan's order;
-    ``store_installation`` uninstalls a stale installation after an account is locked; and the
-    daily purge deletes sessions and then email addresses without the user row lock, while a
-    sign-in writes the email address before it deletes its old session.
+    would be whatever the query plan yields; a bulk DELETE or UPDATE has no order of its own, so
+    a path locks its rows with a separate statement first. Delete my data, a sign-in (a stale
+    installation's uninstall included), ``store_job``, an uninstall, a removal, the daily purge's
+    sessions and email addresses, and a re-queue follow it. Known exceptions, fixed next: the
+    reconciliation stores accounts and repositories in GitHub's order and uninstalls one
+    installation at a time; the backfill ``queue`` takes FOR KEY SHARE on repositories in the
+    plan's order; a backfill run's finish deletes its queued row before it updates the
+    repository; and the daily purge deletes old jobs without their repositories' locks.
     """
     read, key_share = _FOR_UPDATE[lock]
     session.execute(
@@ -216,15 +249,22 @@ def uninstall(session: Session, installation_id: int) -> Deleted:
         return Deleted()
     installations = select(Installation.id).where(Installation.account_id == account_id)
     repositories = _repositories(installations)
-    # Keyword arguments run in order, so children go before their parents.
+    # In the lock order (``lock_repositories``): the repositories, then the account with its
+    # installation, before any user's lists.
+    lock_repositories(session, repositories, lock="UPDATE")
+    session.execute(
+        select(Account.id).join(Installation).where(Account.id == account_id).with_for_update()
+    ).all()
+    # Keyword arguments run in order, so children go before their parents. The installation
+    # lists go before the repository lists, as a sign-in and Delete my data delete them.
     return Deleted(
         jobs=_count(session, delete(Job).where(Job.repository_id.in_(repositories))),
-        user_repositories=_user_repositories(session, repositories),
-        repositories=_count(session, delete(Repository).where(Repository.id.in_(repositories))),
         user_installations=_count(
             session,
             delete(UserInstallation).where(UserInstallation.installation_id.in_(installations)),
         ),
+        user_repositories=_user_repositories(session, repositories),
+        repositories=_count(session, delete(Repository).where(Repository.id.in_(repositories))),
         label_sizes=_count(session, delete(LabelSize).where(LabelSize.account_id == account_id)),
         installations=_count(
             session, delete(Installation).where(Installation.account_id == account_id)
@@ -243,6 +283,8 @@ def remove_repositories(
     repositories = select(Repository.id).where(
         Repository.installation_id == installation_id, Repository.id.in_(repository_ids)
     )
+    # The repositories first, in the lock order (``lock_repositories``).
+    lock_repositories(session, repositories, lock="UPDATE")
     # Keyword arguments run in order, so children go before their parents.
     return Deleted(
         jobs=_count(session, delete(Job).where(Job.repository_id.in_(repositories))),

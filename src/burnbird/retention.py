@@ -132,15 +132,18 @@ def lock_repositories(
     1. repositories, in ID order, through this function;
     2. accounts, in ID order, with their installations;
     3. the user row;
-    4. the user's own rows: sessions, access lists, email address and choices.
+    4. the user's own rows (sessions, access lists, email address and choices), whose order
+       among themselves the user row lock makes safe.
 
     Rows a path inserts follow the same order, in ID order. Without the ORDER BY here the order
     would be whatever the query plan yields. Delete my data, a sign-in, ``store_job``, a backfill
     run and a re-queue follow it. Known exceptions, fixed next: ``uninstall`` and
     ``remove_repositories`` delete repositories in the plan's order; the reconciliation stores
     accounts and repositories in GitHub's order and uninstalls one installation at a time; the
-    backfill ``queue`` takes FOR KEY SHARE on repositories in the plan's order; and
-    ``store_installation`` uninstalls a stale installation after an account is locked.
+    backfill ``queue`` takes FOR KEY SHARE on repositories in the plan's order;
+    ``store_installation`` uninstalls a stale installation after an account is locked; and the
+    daily purge deletes sessions and then email addresses without the user row lock, while a
+    sign-in writes the email address before it deletes its old session.
     """
     read, key_share = _FOR_UPDATE[lock]
     session.execute(

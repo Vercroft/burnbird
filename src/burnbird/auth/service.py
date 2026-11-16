@@ -270,8 +270,8 @@ def store_sign_in(
     with sessions.begin() as session:
         # In the lock order (``lock_repositories``), as Delete my data takes it: the stored
         # repositories, then the accounts, then the user row, then the user's own rows. FOR NO KEY
-        # UPDATE is the lock the repository upsert takes, so a job's insert (FOR KEY SHARE on its
-        # repository) is not held up; Delete my data's FOR UPDATE still waits.
+        # UPDATE is the lock the repository upsert takes anyway, so it holds nothing up that the
+        # upsert would not: a re-queue's FOR KEY SHARE goes on, Delete my data's FOR UPDATE waits.
         lock_repositories(session, [r.repository.id for r in repositories], lock="NO KEY UPDATE")
         for installation in sorted(sign_in.installations, key=lambda i: i.account.id):
             store_installation(session, installation)

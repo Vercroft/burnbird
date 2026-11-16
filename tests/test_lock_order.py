@@ -1,14 +1,14 @@
-"""A sign-in and Delete my data for the same user, at the same moment, never deadlock.
+"""Delete my data and a sign-in or an email choice's save for the same user never deadlock.
 
-Two connections need committed rows; each test deletes them again at the end. The sign-in runs on
-its own connection and is paused just before one statement, holding the locks it took so far;
-Delete my data starts on another connection meanwhile; then the sign-in goes on. Both must finish.
-A deadlock would make Postgres abort one of them, and the test fails with its error.
+Two connections need committed rows; each test deletes them again at the end. The sign-in or the
+save runs on its own connection and is paused just before one statement, holding the locks it took
+so far; Delete my data starts on another connection meanwhile; then the paused one goes on. Both
+must finish. A deadlock would make Postgres abort one of them, and the test fails with its error.
 """
 
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Any
@@ -19,9 +19,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird import retention
 from burnbird.auth.service import ListedRepository, SignIn, store_sign_in
+from burnbird.email.preferences import set_choice
 from burnbird.github import schemas
 from burnbird.models import (
     Account,
+    EmailPreference,
     GithubUser,
     Installation,
     Repository,
@@ -86,8 +88,13 @@ def cleanup(engine: Engine) -> Iterator[list[int]]:
         connection.execute(delete(GithubUser).where(GithubUser.id.in_(ids)))
 
 
-def _race(engine: Engine, sign_in: SignIn, pause_before: str) -> None:
-    """Pause the sign-in before ``pause_before``, run Delete my data, then release the sign-in."""
+def _race(
+    engine: Engine,
+    user_id: int,
+    paused: Callable[[sessionmaker[Session]], object],
+    pause_before: str,
+) -> None:
+    """Pause ``paused`` before ``pause_before``, run Delete my data, then release ``paused``."""
     reached, release = threading.Event(), threading.Event()
 
     def pause(_connection: Connection, _cursor: Any, statement: str, *_: Any) -> None:
@@ -95,24 +102,24 @@ def _race(engine: Engine, sign_in: SignIn, pause_before: str) -> None:
             reached.set()
             assert release.wait(timeout=10)
 
-    def sign_in_now() -> None:
+    def run_paused() -> None:
         with engine.connect() as connection:
             event.listen(connection, "before_cursor_execute", pause)
-            store_sign_in(sessionmaker(bind=connection), sign_in, NOW, None)
+            paused(sessionmaker(bind=connection))
 
     def delete_mine() -> None:
         with sessionmaker(bind=engine).begin() as session:
             session.execute(text("SET LOCAL lock_timeout = '5s'"))
-            retention.delete_my_data(session, sign_in.user_id)
+            retention.delete_my_data(session, user_id)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        signing = pool.submit(sign_in_now)
+        running = pool.submit(run_paused)
         assert reached.wait(timeout=10)
         deleting = pool.submit(delete_mine)
         # Long enough for Delete my data to take every lock it can and wait for the next one.
         time.sleep(0.5)
         release.set()
-        signing.result(timeout=15)
+        running.result(timeout=15)
         deleting.result(timeout=15)
 
 
@@ -129,7 +136,7 @@ def test_a_sign_in_and_delete_my_data_of_a_user_with_a_personal_installation(
     )
     sign_in = SignIn(user_id, f"example-{user_id}", (installation,), (listed,), 0)
 
-    _race(engine, sign_in, "INSERT INTO account")
+    _race(engine, user_id, lambda s: store_sign_in(s, sign_in, NOW, None), "INSERT INTO account")
 
     with Session(engine) as check:
         assert check.get_one(Account, user_id).data_deleted_at is not None
@@ -151,9 +158,40 @@ def test_a_sign_in_and_delete_my_data_of_an_organisation_member(
     )
     sign_in = SignIn(user_id, f"example-{user_id}", (installation,), (listed,), 0)
 
-    _race(engine, sign_in, "DELETE FROM user_installation")
+    _race(
+        engine,
+        user_id,
+        lambda s: store_sign_in(s, sign_in, NOW, None),
+        "DELETE FROM user_installation",
+    )
 
     with Session(engine) as check:
         assert check.get(GithubUser, user_id) is None
         # The organisation's data stays.
         assert check.scalar(select(Repository.id).where(Repository.id == repository_id))
+
+
+def test_an_email_choice_save_and_delete_my_data(engine: Engine, cleanup: list[int]) -> None:
+    # Paused after the save locked its choice's row and before its consent row, whose foreign key
+    # takes FOR KEY SHARE on the user row. Delete my data holds the user row meanwhile and waits
+    # for the choice's row.
+    user_id = 7944
+    cleanup.append(user_id)
+    with engine.begin() as connection:
+        connection.execute(
+            insert(GithubUser).values(id=user_id, login=f"example-{user_id}", last_sign_in_at=NOW)
+        )
+        connection.execute(
+            insert(EmailPreference).values(
+                user_id=user_id, kind="usage_warnings", enabled=True, updated_at=NOW
+            )
+        )
+
+    def save(sessions: sessionmaker[Session]) -> None:
+        with sessions.begin() as session:
+            assert set_choice(session, user_id, "usage_warnings", False, NOW)
+
+    _race(engine, user_id, save, "INSERT INTO email_consent")
+
+    with Session(engine) as check:
+        assert check.get(GithubUser, user_id) is None

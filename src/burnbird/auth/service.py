@@ -275,18 +275,22 @@ def store_sign_in(
         # UPDATE is the lock the repository upsert takes anyway, so it holds nothing up that the
         # upsert would not: a re-queue's FOR KEY SHARE goes on, Delete my data's FOR UPDATE waits.
         # The repositories of a stale installation (``store_installation`` uninstalls it) are
-        # locked here too, before any account.
-        stale = select(Installation.id).where(
-            Installation.account_id.in_([i.account.id for i in sign_in.installations]),
-            Installation.id.not_in([i.id for i in sign_in.installations]),
-        )
+        # locked here too, before any account, and then FOR UPDATE, the lock its deletes take:
+        # upgrading later would wait for a FOR KEY SHARE taken meanwhile, whose path may wait for
+        # this one.
+        stale = session.scalars(
+            select(Installation.id).where(
+                Installation.account_id.in_([i.account.id for i in sign_in.installations]),
+                Installation.id.not_in([i.id for i in sign_in.installations]),
+            )
+        ).all()
         locked = select(Repository.id).where(
             or_(
                 Repository.id.in_([r.repository.id for r in repositories]),
                 Repository.installation_id.in_(stale),
             )
         )
-        lock_repositories(session, locked, lock="NO KEY UPDATE")
+        lock_repositories(session, locked, lock="UPDATE" if stale else "NO KEY UPDATE")
         for installation in sorted(sign_in.installations, key=lambda i: i.account.id):
             store_installation(session, installation)
         for listed in repositories:

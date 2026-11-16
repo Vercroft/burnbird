@@ -143,7 +143,13 @@ def _race(engine: Engine, paused: Path, pause_before: Pause, *others: Path) -> N
             connection.commit()
             if listen:
                 event.listen(connection, "before_cursor_execute", pause)
-            path(sessionmaker(bind=connection))
+            try:
+                path(sessionmaker(bind=connection))
+            finally:
+                # The connection goes back to the pool: the next test starts without the limit.
+                connection.rollback()
+                connection.exec_driver_sql("RESET lock_timeout")
+                connection.commit()
 
     with ThreadPoolExecutor(max_workers=1 + len(others)) as pool:
         running = [pool.submit(run, paused, True)]
@@ -678,3 +684,31 @@ def test_a_backfill_finish_and_delete_my_data(
 
     with Session(engine) as check:
         assert check.get_one(Account, user_id).data_deleted_at is not None
+
+
+def test_a_sign_in_uninstalling_a_stale_installation_a_requeue_and_delete_my_data(
+    engine: Engine, cleanup: list[int]
+) -> None:
+    # The sign-in holds the stale organisation's repository and the user's higher personal one,
+    # paused as its uninstall of the stale installation starts. Delete my data holds the lower
+    # personal one and waits for the higher. A re-queue of the stale and the lower one takes FOR
+    # KEY SHARE: on the stale one only if the sign-in's lock lets it, then waits for the lower.
+    user_id, organisation_id, stale_repository, lower, higher = 7995, 7996, 7997, 7998, 7999
+    cleanup.extend([user_id, organisation_id])
+    personal = _installation(4995, user_id, "User")
+    stale = _installation(4996, organisation_id, "Organization")
+    again = _installation(4997, organisation_id, "Organization")
+    _stored(engine, personal, lower, higher)
+    _stored(engine, stale, stale_repository)
+    sign_in = _sign_in(user_id, (personal, again), (personal.id, higher))
+
+    _race(
+        engine,
+        _signs_in(sign_in),
+        "SELECT installation.account_id",
+        _delete_my_data(user_id),
+        _transaction(lambda session: backfill.requeue(session, [stale_repository, lower])),
+    )
+
+    with Session(engine) as check:
+        assert check.get(Installation, stale.id) is None

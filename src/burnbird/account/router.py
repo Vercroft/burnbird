@@ -8,7 +8,7 @@ cookie is cleared and the browser is sent to a plain page that needs no session.
 from datetime import UTC, datetime
 from typing import Annotated, Final
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 
 from burnbird import retention
@@ -31,6 +31,8 @@ router = APIRouter(prefix="/you")
 PRIVACY_URL: Final = "https://github.com/Vercroft/burnbird/blob/main/PRIVACY.md"
 # The form field of the run-out warnings switch; a ticked checkbox sends "on".
 WARNINGS_FIELD: Final = "usage_warnings"
+# The required checkbox of the Delete my data form; the server checks it too.
+CONFIRM_DELETE_FIELD: Final = "confirm_delete"
 
 
 @router.get("")
@@ -53,6 +55,7 @@ def show(request: Request, user: Annotated[int | None, Depends(current_user)]) -
         warnings_field=WARNINGS_FIELD,
         csrf_token=csrf_token(request),
         privacy_url=PRIVACY_URL,
+        confirm_field=CONFIRM_DELETE_FIELD,
     )
 
 
@@ -62,18 +65,32 @@ def save_email_choice(
     user: Annotated[int, Depends(require_user)],
     form: Annotated[dict[str, list[str]], Depends(posted_form)],
 ) -> Response:
-    """Save the run-out warnings switch; a change is recorded once, a repeat not at all."""
+    """Save the run-out warnings switch; a change is recorded once, a repeat not at all.
+
+    A ticked box sends the field once, as "on"; an unticked one sends nothing. Anything else (a
+    repeated field, another value) is not this form, so it changes nothing.
+    """
+    sent = form.get(WARNINGS_FIELD)
+    if sent is not None and sent != ["on"]:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "the warnings switch is not valid")
     state = auth_state(request)
     with state.sessions.begin() as session:
-        set_choice(
-            session, user, "usage_warnings", form.get(WARNINGS_FIELD) == ["on"], state.now()
-        )
+        set_choice(session, user, "usage_warnings", sent == ["on"], state.now())
     return RedirectResponse("/you", status.HTTP_303_SEE_OTHER)
 
 
 @router.post("/delete", dependencies=[Depends(csrf_protected)])
-def delete(request: Request, user: Annotated[int, Depends(require_user)]) -> Response:
-    """Delete my data, in one transaction, then end the session in the browser too."""
+def delete(
+    request: Request,
+    user: Annotated[int, Depends(require_user)],
+    form: Annotated[dict[str, list[str]], Depends(posted_form)],
+) -> Response:
+    """Delete my data, in one transaction, then end the session in the browser too.
+
+    It cannot be undone, so the form's confirm box must be ticked: exactly one "yes".
+    """
+    if form.get(CONFIRM_DELETE_FIELD) != ["yes"]:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "tick the box to confirm")
     with auth_state(request).sessions.begin() as session:
         retention.delete_my_data(session, user)
     response = RedirectResponse("/you/deleted", status.HTTP_303_SEE_OTHER)

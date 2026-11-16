@@ -44,6 +44,7 @@
 <p>This removes what Burnbird stores about you now: your user record, your email address and choices, your sessions and access lists, and the jobs of your personal account. While the App stays installed, new jobs are collected again. Uninstall the App to stop collection.</p>
 <form method="post" action="/you/delete">
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<p><label><input type="checkbox" name="{{ confirm_field }}" value="yes" required> I understand this cannot be undone.</label></p>
 <p><button type="submit">Delete my data</button></p>
 </form>
 </section>

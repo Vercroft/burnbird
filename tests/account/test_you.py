@@ -193,7 +193,11 @@ def test_the_page_shows_nothing_of_another_user(
 
 def test_only_the_run_out_warnings_switch_is_shown(client: TestClient, signed_in: str) -> None:
     html = client.get("/you").text
-    assert re.findall(r'type="checkbox" name="([^"]+)"', html) == ["usage_warnings"]
+    # The one email switch, and the Delete my data form's confirm box.
+    assert re.findall(r'type="checkbox" name="([^"]+)"', html) == [
+        "usage_warnings",
+        "confirm_delete",
+    ]
     assert "weekly" not in html.lower()
     assert "news" not in html.lower()
 
@@ -331,7 +335,9 @@ def test_delete_my_data_removes_everything_and_ends_the_session(
     assert _rows_of(session, USER)["session"] == 2
     others_before = _rows_of(session, OTHER_USER)
     response = client.post(
-        "/you/delete", data={"csrf_token": signed_in}, headers={"Origin": ORIGIN}
+        "/you/delete",
+        data={"csrf_token": signed_in, "confirm_delete": "yes"},
+        headers={"Origin": ORIGIN},
     )
     assert response.status_code == 303
     assert response.headers["location"] == "/you/deleted"
@@ -363,3 +369,60 @@ def test_delete_my_data_needs_the_session_s_token_and_this_site(
     data = {} if origin == ORIGIN else {"csrf_token": signed_in}
     assert client.post("/you/delete", data=data, headers={"Origin": origin}).status_code == 403
     assert (_rows_of(session, USER), _rows_of(session, OTHER_USER)) == before
+
+
+def test_the_delete_form_asks_to_confirm(client: TestClient, signed_in: str) -> None:
+    html = client.get("/you").text
+    form = html[html.index('action="/you/delete"') :]
+    form = form[: form.index("</form>")]
+    assert re.search(r'<input type="checkbox" name="confirm_delete" value="yes" required>', form)
+    assert "I understand this cannot be undone." in _text(form)
+
+
+@pytest.mark.parametrize(
+    "confirm",
+    ["", "&confirm_delete=no", "&confirm_delete=yes&confirm_delete=yes"],
+    ids=["missing", "no", "sent twice"],
+)
+def test_delete_my_data_without_the_confirm_box_deletes_nothing(
+    confirm: str, client: TestClient, other_user: str, signed_in: str, session: Session
+) -> None:
+    before = (_rows_of(session, USER), _rows_of(session, OTHER_USER))
+    response = client.post(
+        "/you/delete",
+        content=f"csrf_token={signed_in}{confirm}",
+        headers={"Origin": ORIGIN, "Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert response.status_code == 400
+    assert "set-cookie" not in response.headers
+    assert (_rows_of(session, USER), _rows_of(session, OTHER_USER)) == before
+
+
+def test_a_repeated_warnings_field_is_refused(
+    client: TestClient, signed_in: str, session: Session
+) -> None:
+    before = (_choices(session), _consents(session))
+    response = client.post(
+        "/you/email",
+        content=f"csrf_token={signed_in}&usage_warnings=on&usage_warnings=on",
+        headers={"Origin": ORIGIN, "Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert response.status_code == 400
+    assert (_choices(session), _consents(session)) == before
+    # The switch was on; turning it off with the same request shape still works once.
+    assert _save(client, signed_in, on=False).status_code == 303
+    assert _choices(session)["usage_warnings"] is False
+
+
+@pytest.mark.parametrize("value", ["yes", "off"])
+def test_a_warnings_field_that_is_not_on_is_refused(
+    value: str, client: TestClient, signed_in: str, session: Session
+) -> None:
+    before = (_choices(session), _consents(session))
+    response = client.post(
+        "/you/email",
+        data={"csrf_token": signed_in, "usage_warnings": value},
+        headers={"Origin": ORIGIN},
+    )
+    assert response.status_code == 400
+    assert (_choices(session), _consents(session)) == before

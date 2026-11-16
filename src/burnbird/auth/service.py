@@ -28,7 +28,7 @@ import httpx2
 from authlib.integrations.starlette_client import OAuth  # type: ignore[import-untyped]  # Authlib ships no type information
 from authlib.integrations.starlette_client import OAuthError as OAuthError
 from pydantic import TypeAdapter, ValidationError
-from sqlalchemy import delete
+from sqlalchemy import delete, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -47,6 +47,8 @@ from burnbird.github.client import GithubAnswerError as GithubAnswerError
 from burnbird.github.events import store_installation, store_repository
 from burnbird.models import (
     GithubUser,
+    Installation,
+    Repository,
     UserEmail,
     UserInstallation,
     UserRepository,
@@ -272,7 +274,19 @@ def store_sign_in(
         # repositories, then the accounts, then the user row, then the user's own rows. FOR NO KEY
         # UPDATE is the lock the repository upsert takes anyway, so it holds nothing up that the
         # upsert would not: a re-queue's FOR KEY SHARE goes on, Delete my data's FOR UPDATE waits.
-        lock_repositories(session, [r.repository.id for r in repositories], lock="NO KEY UPDATE")
+        # The repositories of a stale installation (``store_installation`` uninstalls it) are
+        # locked here too, before any account.
+        stale = select(Installation.id).where(
+            Installation.account_id.in_([i.account.id for i in sign_in.installations]),
+            Installation.id.not_in([i.id for i in sign_in.installations]),
+        )
+        locked = select(Repository.id).where(
+            or_(
+                Repository.id.in_([r.repository.id for r in repositories]),
+                Repository.installation_id.in_(stale),
+            )
+        )
+        lock_repositories(session, locked, lock="NO KEY UPDATE")
         for installation in sorted(sign_in.installations, key=lambda i: i.account.id):
             store_installation(session, installation)
         for listed in repositories:

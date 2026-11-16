@@ -53,6 +53,7 @@ from burnbird.models import (
     UserSession,
     storable_address,
 )
+from burnbird.retention import lock_repositories
 
 logger = logging.getLogger(__name__)
 
@@ -265,7 +266,17 @@ def store_sign_in(
     """
     session_id = secrets.token_urlsafe(32)
     user_id = sign_in.user_id
+    repositories = sorted(sign_in.repositories, key=lambda listed: listed.repository.id)
     with sessions.begin() as session:
+        # In the lock order (``lock_repositories``), as Delete my data takes it: the stored
+        # repositories, then the accounts, then the user row, then the user's own rows. FOR NO KEY
+        # UPDATE is the lock the repository upsert takes, so a job's insert (FOR KEY SHARE on its
+        # repository) is not held up; Delete my data's FOR UPDATE still waits.
+        lock_repositories(session, [r.repository.id for r in repositories], lock="NO KEY UPDATE")
+        for installation in sorted(sign_in.installations, key=lambda i: i.account.id):
+            store_installation(session, installation)
+        for listed in repositories:
+            store_repository(session, listed.installation_id, listed.repository)
         session.execute(
             insert(GithubUser)
             .values(id=user_id, login=sign_in.login, last_sign_in_at=now)
@@ -274,10 +285,6 @@ def store_sign_in(
                 set_={"login": sign_in.login, "last_sign_in_at": now},
             )
         )
-        for installation in sign_in.installations:
-            store_installation(session, installation)
-        for listed in sign_in.repositories:
-            store_repository(session, listed.installation_id, listed.repository)
         session.execute(delete(UserInstallation).where(UserInstallation.user_id == user_id))
         session.execute(delete(UserRepository).where(UserRepository.user_id == user_id))
         _insert(

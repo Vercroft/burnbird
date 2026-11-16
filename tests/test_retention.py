@@ -6,9 +6,10 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy import Connection, event, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird import retention
+from burnbird.auth.service import SignIn, store_sign_in
 from burnbird.github import backfill
 from burnbird.models import (
     Account,
@@ -454,17 +455,17 @@ def sent(connection: Connection) -> Iterator[list[str]]:
 
 
 def _locks(statements: list[str]) -> list[str]:
-    return [s for s in statements if "FOR UPDATE" in s or "FOR KEY SHARE" in s]
+    # The repository locks only: Delete my data also locks the user row.
+    return [s for s in statements if s.startswith("SELECT repository.id") and " FOR " in s]
 
 
-@pytest.mark.parametrize(("key_share", "mode"), [(False, "FOR UPDATE"), (True, "FOR KEY SHARE")])
+@pytest.mark.parametrize("lock", ["UPDATE", "NO KEY UPDATE", "KEY SHARE"])
 def test_lock_repositories_locks_in_id_order(
-    session: Session, sent: list[str], key_share: bool, mode: str
+    session: Session, sent: list[str], lock: retention.RowLock
 ) -> None:
-    retention.lock_repositories(session, [5002, 5001], key_share=key_share)
-    [lock] = _locks(sent)
-    assert "ORDER BY repository.id" in lock
-    assert lock.rstrip().endswith(f"ORDER BY repository.id {mode}")
+    retention.lock_repositories(session, [5002, 5001], lock=lock)
+    [statement] = _locks(sent)
+    assert statement.rstrip().endswith(f"ORDER BY repository.id FOR {lock}")
 
 
 @pytest.mark.parametrize(
@@ -474,6 +475,16 @@ def test_lock_repositories_locks_in_id_order(
             lambda s: retention.delete_my_data(s, 7001), "FOR UPDATE", id="delete_my_data"
         ),
         pytest.param(lambda s: backfill.requeue(s, [5002, 5001]), "FOR KEY SHARE", id="requeue"),
+        pytest.param(
+            lambda s: store_sign_in(
+                sessionmaker(bind=s.connection(), join_transaction_mode="create_savepoint"),
+                SignIn(7001, "example-7001", (), (), 0),
+                NOW,
+                None,
+            ),
+            "FOR NO KEY UPDATE",
+            id="store_sign_in",
+        ),
     ],
 )
 def test_every_path_that_locks_several_repositories_locks_them_in_id_order(

@@ -636,13 +636,7 @@ def test_the_backfill_queue_delete_my_data_and_a_sign_in(
     # the queue's FOR KEY SHARE does not wait for the sign-in.
     user_id, lower, higher = 7990, 7991, 7992
     cleanup.append(user_id)
-    installation = _installation(4990, user_id, "User")
-    _stored(engine, installation, higher, lower)
-    with engine.connect() as connection:
-        order = connection.scalars(
-            select(Repository.id).where(Repository.id.in_([lower, higher])).order_by(text("ctid"))
-        ).all()
-    assert order == [higher, lower]
+    installation = _stored_higher_first(engine, user_id, lower, higher)
 
     _race(
         engine,
@@ -795,3 +789,81 @@ def test_the_backfill_queue_and_a_requeue_of_the_same_repository(
 
     # The queue skipped the row the re-queue committed.
     assert queued == [0]
+
+
+def _requeues_lower_then_higher(lower: int, higher: int) -> tuple[Path, Pause]:
+    """Re-queue the lower repository, then the higher; paused before the higher one's insert."""
+
+    def requeues(session: Session) -> None:
+        backfill.requeue(session, [lower])
+        backfill.requeue(session, [higher])
+
+    def before_higher(statement: str, parameters: Any) -> bool:
+        return statement.startswith("INSERT INTO backfill") and higher in parameters.values()
+
+    return _transaction(requeues), before_higher
+
+
+def _stored_higher_first(
+    engine: Engine, user_id: int, lower: int, higher: int
+) -> schemas.Installation:
+    """Store a personal installation and two repositories, the higher one physically first.
+
+    The repository table is emptied first: Postgres puts a new row wherever it finds free space,
+    so after other tests' rows the second can land before the first. An empty table takes them
+    on its first page, in insert order.
+    """
+    with engine.begin() as connection:
+        connection.execute(text("TRUNCATE repository CASCADE"))
+    installation = _installation(user_id - 3000, user_id, "User")
+    _stored(engine, installation, higher, lower)
+    with engine.connect() as connection:
+        order = connection.scalars(
+            select(Repository.id).where(Repository.id.in_([lower, higher])).order_by(text("ctid"))
+        ).all()
+    assert order == [higher, lower]
+    return installation
+
+
+def test_the_backfill_queue_and_a_requeue_insert_in_id_order(
+    engine: Engine, cleanup: list[int]
+) -> None:
+    # The higher repository is stored first, so a queue that inserts in the order it reads takes
+    # the higher row first, then waits for the re-queue's lower one.
+    user_id, lower, higher = 8006, 8007, 8008
+    cleanup.append(user_id)
+    _stored_higher_first(engine, user_id, lower, higher)
+    queued: list[int] = []
+
+    _race(
+        engine,
+        *_requeues_lower_then_higher(lower, higher),
+        _transaction(lambda session: queued.append(backfill.queue(session))),
+    )
+
+    # The queue waited for the re-queue and skipped both rows it committed.
+    assert queued == [0]
+
+
+def test_two_requeues_insert_in_id_order(engine: Engine, cleanup: list[int]) -> None:
+    # The same with a re-queue of both. Without index scans its select reads in physical order,
+    # a plan Postgres may choose: nothing else puts the rows in ID order.
+    user_id, lower, higher = 8009, 8010, 8011
+    cleanup.append(user_id)
+    _stored_higher_first(engine, user_id, lower, higher)
+
+    def requeues_both(session: Session) -> None:
+        session.execute(text("SET LOCAL enable_indexscan = off"))
+        session.execute(text("SET LOCAL enable_bitmapscan = off"))
+        backfill.requeue(session, [lower, higher])
+
+    _race(engine, *_requeues_lower_then_higher(lower, higher), _transaction(requeues_both))
+
+    with Session(engine) as check:
+        generations = check.scalars(
+            select(Backfill.generation)
+            .where(Backfill.repository_id.in_([lower, higher]))
+            .order_by(Backfill.repository_id)
+        ).all()
+    # The second re-queue waited for the first and raised both rows' generation.
+    assert generations == [1, 1]

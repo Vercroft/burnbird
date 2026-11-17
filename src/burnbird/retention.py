@@ -179,10 +179,10 @@ def lock_repositories(
     would be whatever the query plan yields; a bulk DELETE or UPDATE has no order of its own, so
     a path locks its rows with a separate statement first. Delete my data, a sign-in (a stale
     installation's uninstall included), ``store_job``, an uninstall, a removal, the
-    reconciliation, a backfill run, the backfill queue's and a re-queue's locks, and the daily
-    purge follow it. One known exception is left, a single statement that no test can pause
-    between its rows yet: the backfill queue and a re-queue insert queued rows in the order they
-    read them, so the two at once can each wait for the other's new row.
+    reconciliation, a backfill run, the backfill queue and a re-queue, and the daily purge follow
+    it. The queue and a re-queue also insert their queued rows in ID order, so the two at once
+    never each wait for the other's new row: Postgres inserts an INSERT ... SELECT's rows in its
+    ORDER BY order in practice, though it does not document it.
     """
     read, key_share = _FOR_UPDATE[lock]
     session.execute(

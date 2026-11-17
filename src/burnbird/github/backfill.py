@@ -4,10 +4,11 @@ Webhooks carry each job as it completes, so the backfill fills what they cannot:
 current cycle from before a repository came under Burnbird, and those of an event that stayed lost.
 The hourly reconciliation queues every repository never backfilled (``queue``); the redelivery
 re-queues a repository whose job event was lost, and every repository after a gap longer than
-GitHub keeps deliveries (``requeue``). The worker then backfills one queued repository per pass
-(``run_next``). A re-queue clears the progress and raises the row's generation: a pass already
-running writes nothing more and stops, and the next one starts again at the cycle start. No pass
-starts before the account's ``data_deleted_at``.
+GitHub keeps deliveries (``requeue``). Both lock the repositories and insert their rows in ID
+order, and the queue skips a repository a re-queue queued meanwhile. The worker then backfills one
+queued repository per pass (``run_next``). A re-queue clears the progress and raises the row's
+generation: a pass already running writes nothing more and stops, and the next one starts again at
+the cycle start. No pass starts before the account's ``data_deleted_at``.
 
 A pass over one repository:
 1. **Lease.** A due row is claimed with ``FOR UPDATE SKIP LOCKED`` and its ``retry_at`` moved 30
@@ -126,12 +127,19 @@ def queue(session: Session) -> int:
     queued once, and never again after its backfill finished. One a re-queue queues meanwhile is
     skipped.
     """
-    never = select(Repository.id).where(
-        Repository.backfilled_at.is_(None),
-        ~select(Backfill.repository_id).where(Backfill.repository_id == Repository.id).exists(),
+    never = (
+        select(Repository.id)
+        .where(
+            Repository.backfilled_at.is_(None),
+            ~select(Backfill.repository_id)
+            .where(Backfill.repository_id == Repository.id)
+            .exists(),
+        )
+        .order_by(Repository.id)
     )
     # FOR KEY SHARE, the lock the inserts' foreign keys take anyway, but in ID order, as Delete my
-    # data locks them, rather than in the order the rows are read.
+    # data locks them, rather than in the order the rows are read. The rows are inserted in ID
+    # order too, so this and a re-queue at the same time never each wait for the other's new row.
     lock_repositories(session, never, lock="KEY SHARE")
     # A repository a re-queue queued meanwhile, not visible to this statement, is skipped.
     queued = session.execute(
@@ -160,7 +168,8 @@ def requeue(session: Session, repository_ids: Collection[int]) -> int:
         insert(Backfill)
         .from_select(
             [Backfill.repository_id],
-            select(Repository.id).where(Repository.id.in_(repository_ids)),
+            # In ID order, as the queue inserts them.
+            select(Repository.id).where(Repository.id.in_(repository_ids)).order_by(Repository.id),
         )
         .on_conflict_do_update(
             index_elements=[Backfill.repository_id],

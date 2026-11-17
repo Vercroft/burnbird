@@ -16,6 +16,7 @@ from burnbird.auth.config import AuthSettings, settings_from_environment
 from burnbird.auth.dependencies import AuthState
 from burnbird.auth.service import OAUTH_COOKIE, OAUTH_COOKIE_SECONDS, github_oauth
 from burnbird.database import database_url, make_engine
+from burnbird.email import router as email
 from burnbird.github import config
 from burnbird.github import router as github
 from burnbird.github.router import WebhookState
@@ -55,6 +56,7 @@ def create_app(
     app.include_router(github.router)
     app.include_router(auth.router)
     app.include_router(account.router)
+    app.include_router(email.router)
     return app
 
 

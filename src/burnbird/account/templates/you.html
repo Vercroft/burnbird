@@ -10,6 +10,9 @@
 {% else %}
 <p>Burnbird has no email address for you. It stores your GitHub primary address when GitHub marks it verified and lets Burnbird read it. To get run-out warnings by email, approve Burnbird's 'Email addresses' permission on GitHub if asked, then sign in again.</p>
 {% endif %}
+{% if off_by_link %}
+<p>Run-out warnings: off, turned off by the email link on {{ off_by_link }}. Turn them on again with the switch below.</p>
+{% endif %}
 {% if data.warnings is not none %}
 <form method="post" action="/you/email">
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

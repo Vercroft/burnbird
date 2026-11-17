@@ -104,7 +104,7 @@ messages, the pull request title or its description. Its output names only the c
 | `src/burnbird/email/` | Email: `preferences.py` writes each user's email choices once and records every change; `consent.txt` is the consent wording shown next to the switch, and `consent.py` gives it and its version (the start of its SHA-256); `config.py` reads the email settings (the provider with its bare send token, or a loopback Mailpit only); `message.py` renders an email from `templates/` (`layout.html` and `layout.txt` give every email its footer and, for usage email, its one-click unsubscribe) and builds the provider's JSON or a MIME message; `sender.py` makes one send and maps each answer to one outcome (sent, retry, reset, config, failed, or unknown, which is never resent); `outbox.py` queues an email once (its dedupe key) and is the worker's `email-send` step: it leases a queued row, checks it (expiry, address, suppression, choice, access, the rolling 24-hour caps), and sends it at most once while the row stays locked, so Delete my data waits for a send in progress (a worker killed, or a commit lost, after the POST sends it again: no code can tell the POST was made). The provider's daily limit or a configuration error pauses every send. Nothing queues an email yet |
 | `src/burnbird/templates.py`, `src/burnbird/templates/` | The one Jinja2 environment for pages and email (autoescape on for `.html`, templates shipped in the package) and the shared base layout |
 | `src/burnbird/security_headers.py` | The security headers every answer carries |
-| `src/burnbird/logs.py` | The commands' logging: one formatter that redacts token-shaped values, `Authorization` values, OAuth secrets and the callback's code and state, and masks an email address to its first character and domain |
+| `src/burnbird/logs.py` | The commands' logging: one formatter that redacts token-shaped values, `Authorization` values, OAuth secrets, the callback's code and state and an unsubscribe link's token, and masks an email address to its first character and domain |
 | `src/burnbird/web.py` | Creates the web app: the security headers, the body limit and each feature's router, nothing else |
 | `src/burnbird/worker.py` | One pass of the worker: the stored deliveries, then the periodic tasks that are due (reconciliation, redelivery), then at most one repository's backfill, then the queued emails, then the daily purge, each step isolated |
 | `src/burnbird/purge.py` | The daily purge task: claims the run and calls `retention.run_purges` |
@@ -198,7 +198,11 @@ One pull request:
   Templates hold no script, no inline style and no event handler attribute, and load nothing from another site;
   `tests/test_templates.py` checks every template.
 - Every POST depends on `csrf_protected`, except the ones `tests/test_csrf_boundary.py` lists with their reason; a new
-  exemption is a reviewed change there.
+  exemption is a reviewed change there. The one-click unsubscribe POST (`/email/unsubscribe/{token}`) is one: RFC 8058
+  says the mail client sends it with no cookie or other context, so the token in the path is its only proof. It
+  answers 200 with no redirect, the same for an unknown token, and it can only turn a kind of email off; its GET
+  only shows the button. A token not shaped like one gets 404 on both, so the page never writes a form address
+  someone else chose.
 - Consent rows (`email_consent`) are append-only: a choice is changed in `email_preference` and recorded as a new
   consent row, never by updating or deleting one, except when the user's data is deleted. A user's default choices
   are written once, when their first address is stored, and never reset. A changed `email/consent.txt` is a new

@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from burnbird.auth.config import AuthSettings
 from burnbird.auth.service import SESSION_COOKIE
 from burnbird.email import consent
+from burnbird.email.preferences import set_choice
 from burnbird.models import (
     Account,
     EmailConsent,
@@ -283,6 +284,29 @@ def test_with_warnings_off_the_page_promises_no_warnings(
     html = client.get("/you").text
     assert "Warnings continue until" not in html
     assert 'name="usage_warnings" value="on">' in html
+
+
+def test_warnings_turned_off_by_the_email_link_say_so_until_the_switch_turns_them_on(
+    client: TestClient, signed_in: str, session: Session
+) -> None:
+    set_choice(session, USER, "usage_warnings", False, NOW + timedelta(days=1), source="one_click")
+    session.flush()
+    turned_off = "Run-out warnings: off, turned off by the email link on "
+    assert turned_off + _day(NOW + timedelta(days=1)) in _text(client.get("/you").text)
+    _save(client, signed_in, on=True)
+    assert turned_off not in _text(client.get("/you").text)
+    assert _choices(session)["usage_warnings"] is True
+
+
+def test_warnings_turned_off_on_the_page_do_not_name_the_email_link(
+    client: TestClient, signed_in: str
+) -> None:
+    _save(client, signed_in, on=False)
+    assert "turned off by the email link" not in client.get("/you").text
+
+
+def _day(when: datetime) -> str:
+    return when.astimezone(UTC).strftime("%d %b %Y")
 
 
 def test_a_later_sign_in_never_resets_a_choice(

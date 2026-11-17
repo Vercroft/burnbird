@@ -44,7 +44,7 @@ from burnbird.github.client import (
     rate_limit_resume,
 )
 from burnbird.github.client import GithubAnswerError as GithubAnswerError
-from burnbird.github.events import store_installation, store_repository
+from burnbird.github.events import store_installation, store_repositories
 from burnbird.models import (
     GithubUser,
     Installation,
@@ -297,8 +297,10 @@ def store_sign_in(
         lock_repositories(session, locked, lock="UPDATE" if stale else "NO KEY UPDATE")
         for installation in sorted(sign_in.installations, key=lambda i: i.account.id):
             store_installation(session, installation)
-        for listed in repositories:
-            store_repository(session, listed.installation_id, listed.repository)
+        # In ID order, in one pipelined call (``store_repositories``).
+        store_repositories(
+            session, [(listed.installation_id, listed.repository) for listed in repositories]
+        )
         session.execute(
             insert(GithubUser)
             .values(id=user_id, login=sign_in.login, last_sign_in_at=now)

@@ -1065,3 +1065,26 @@ def test_a_sign_in_and_the_reconciliation_installing_an_account_again(
     with Session(engine) as check:
         assert check.get(Installation, newer.id) is not None
         assert check.get(Installation, listed.id) is None
+
+
+def test_a_sign_in_storing_new_repositories_listed_out_of_id_order(
+    engine: Engine, cleanup: list[int], github_app: tuple[FakeGithub, GithubApp]
+) -> None:
+    # GitHub lists two new repositories in another order than their IDs, to both paths. The
+    # reconciliation inserts the lower one and is paused before the higher. The sign-in's one
+    # pipelined call must insert the lower first too, and wait for it, rather than hold the higher.
+    github, app = github_app
+    user_id, organisation_id, first, second = 8111, 8112, 8113, 8114
+    cleanup.extend([user_id, organisation_id])
+    installation = _installation(5112, organisation_id, "Organization")
+    _stored(engine, installation)
+    _lists(github, installation)
+    github.repositories = {installation.id: [repository_item(second), repository_item(first)]}
+    sign_in = _sign_in(
+        user_id, (installation,), (installation.id, second), (installation.id, first)
+    )
+
+    _race(engine, _reconciles(app), _inserts("repository", second), _signs_in(sign_in))
+
+    with Session(engine) as check:
+        assert check.get(Repository, second) is not None

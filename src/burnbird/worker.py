@@ -1,9 +1,9 @@
 """The worker command's work: one pass over everything that is due.
 
 A pass takes the stored webhook deliveries first, then the periodic tasks that are due, then at
-most one repository's backfill, then the daily purge when it is due. Each step
-is an isolation point: a failure is logged and the next step still runs, so one broken step never
-stops the others. The loop that repeats passes belongs to the worker command.
+most one repository's backfill, then the queued emails, then the daily purge when it is due. Each
+step is an isolation point: a failure is logged and the next step still runs, so one broken step
+never stops the others. The loop that repeats passes belongs to the worker command.
 """
 
 import logging
@@ -14,6 +14,8 @@ from typing import Final
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird import purge
+from burnbird.email import outbox
+from burnbird.email.outbox import Mail
 from burnbird.github import backfill, events, reconcile, redeliver
 from burnbird.github.client import GithubApp
 
@@ -23,7 +25,9 @@ logger = logging.getLogger(__name__)
 DELIVERIES_PER_PASS: Final = 1000
 
 
-def run_once(sessions: sessionmaker[Session], github: GithubApp, now: datetime) -> int:
+def run_once(
+    sessions: sessionmaker[Session], github: GithubApp, now: datetime, *, mail: Mail
+) -> int:
     """Run one pass and return how many webhook deliveries it took."""
     taken = _step(
         "deliveries", lambda: events.process_pending(sessions, now, DELIVERIES_PER_PASS), 0
@@ -31,6 +35,7 @@ def run_once(sessions: sessionmaker[Session], github: GithubApp, now: datetime) 
     _step("reconcile", lambda: reconcile.run(sessions, github, now), False)
     _step("redeliver", lambda: redeliver.run(sessions, github, now), False)
     _step("backfill", lambda: backfill.run_next(sessions, github, now), False)
+    _step("email-send", lambda: outbox.run(sessions, mail, now), 0)
     _step("purge", lambda: purge.run(sessions, now), False)
     return taken
 

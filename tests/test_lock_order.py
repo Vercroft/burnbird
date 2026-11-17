@@ -24,6 +24,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird import retention
 from burnbird.auth.service import ListedRepository, SignIn, session_digest, store_sign_in
+from burnbird.email import outbox
+from burnbird.email.outbox import Mail
 from burnbird.email.preferences import set_choice
 from burnbird.github import backfill, reconcile, schemas
 from burnbird.github.client import GithubApp
@@ -31,6 +33,7 @@ from burnbird.github.events import HANDLERS, process_next, store_job
 from burnbird.models import (
     Account,
     Backfill,
+    EmailOutbox,
     EmailPreference,
     GithubUser,
     Installation,
@@ -41,7 +44,9 @@ from burnbird.models import (
     UserRepository,
     UserSession,
     WebhookDelivery,
+    WorkerTask,
 )
+from tests.email.examples import RecordingSender, example_environment
 from tests.github import fakes
 from tests.github.fakes import FakeGithub, installation_item, repository_item
 
@@ -1136,3 +1141,157 @@ def test_the_daily_purge_and_a_worker_processing_an_old_delivery(
     finally:
         with engine.begin() as connection:
             connection.execute(delete(WebhookDelivery).where(WebhookDelivery.id == delivery_id))
+
+
+def _recipient(engine: Engine, user_id: int) -> uuid.UUID:
+    """A user with a personal installation, an address and warnings on, and one queued email."""
+    with engine.begin() as connection:
+        connection.execute(
+            insert(GithubUser).values(id=user_id, login=f"example-{user_id}", last_sign_in_at=NOW)
+        )
+    _stored(engine, _installation(user_id - 3000, user_id, "User"))
+    with sessionmaker(bind=engine).begin() as session:
+        session.add_all(
+            [
+                UserInstallation(user_id=user_id, installation_id=user_id - 3000),
+                UserEmail(
+                    user_id=user_id, address=f"u{user_id}" + "@" + "example.invalid", read_at=NOW
+                ),
+                EmailPreference(
+                    user_id=user_id, kind="usage_warnings", enabled=True, updated_at=NOW
+                ),
+            ]
+        )
+        session.flush()
+        outbox.enqueue(
+            session,
+            user_id=user_id,
+            account_id=user_id,
+            kind="usage_warnings",
+            template="run_out_warning",
+            dedupe_key=f"example:race:{user_id}",
+            params={"account": user_id},
+            now=NOW,
+            expires_at=NOW + timedelta(days=1),
+        )
+    with Session(engine) as check:
+        return check.scalars(select(EmailOutbox.id).where(EmailOutbox.user_id == user_id)).one()
+
+
+@pytest.fixture
+def sending(engine: Engine) -> Iterator[tuple[Mail, list[str]]]:
+    """A recording sender and the order of events; the email task's row is deleted after."""
+    events: list[str] = []
+    sender = RecordingSender(on_send=lambda: events.append("sent"))
+    yield Mail(sender, "https://burnbird.example.invalid", example_environment()), events
+    with engine.begin() as connection:
+        connection.execute(delete(WorkerTask).where(WorkerTask.name == outbox.TASK))
+
+
+def _sends(mail: Mail) -> Path:
+    return lambda sessions: outbox.run(sessions, mail, NOW)
+
+
+def _then(events: list[str], name: str, work: Callable[[Session], object]) -> Path:
+    """Run ``work`` in one transaction, then record ``name`` once it has committed."""
+
+    def run(sessions: sessionmaker[Session]) -> None:
+        with sessions.begin() as session:
+            work(session)
+        events.append(name)
+
+    return run
+
+
+@pytest.mark.parametrize(
+    "remove",
+    [retention.delete_my_data, retention.revoke_authorization],
+    ids=["delete my data", "revoke"],
+)
+def test_an_email_send_and_a_user_s_deletion(
+    engine: Engine,
+    cleanup: list[int],
+    sending: tuple[Mail, list[str]],
+    remove: Callable[[Session, int], object],
+) -> None:
+    # The send holds the outbox row and is paused before it reads the address; the deletion
+    # deletes outbox rows first, so it waits for the POST and nothing is sent after it commits.
+    mail, events = sending
+    user_id = 8120
+    cleanup.append(user_id)
+    _recipient(engine, user_id)
+
+    _race(
+        engine,
+        _sends(mail),
+        "SELECT user_email.address",
+        _then(events, "deleted", lambda session: remove(session, user_id)),
+    )
+
+    assert events == ["sent", "deleted"]
+
+
+def test_a_queued_email_deleted_first_is_never_sent(
+    engine: Engine, cleanup: list[int], sending: tuple[Mail, list[str]]
+) -> None:
+    # Delete my data has deleted the outbox row and is paused before the address: the claim skips
+    # the locked row, and once the deletion commits there is nothing left to send.
+    mail, events = sending
+    user_id = 8121
+    cleanup.append(user_id)
+    row_id = _recipient(engine, user_id)
+
+    _race(
+        engine,
+        _then(events, "deleted", lambda session: retention.delete_my_data(session, user_id)),
+        "DELETE FROM user_email",
+        _sends(mail),
+    )
+
+    assert events == ["deleted"]
+    with Session(engine) as check:
+        assert check.get(EmailOutbox, row_id) is None
+
+
+def test_an_email_send_and_an_uninstall(
+    engine: Engine, cleanup: list[int], sending: tuple[Mail, list[str]]
+) -> None:
+    mail, events = sending
+    user_id = 8122
+    cleanup.append(user_id)
+    _recipient(engine, user_id)
+
+    _race(
+        engine,
+        _sends(mail),
+        "SELECT user_email.address",
+        _then(events, "uninstalled", lambda session: retention.uninstall(session, user_id - 3000)),
+    )
+
+    assert events == ["sent", "uninstalled"]
+
+
+def test_two_workers_at_the_cap_send_once(
+    engine: Engine,
+    cleanup: list[int],
+    sending: tuple[Mail, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Room for one more email. The first worker holds the task row during its send; the second
+    # claims the other email, waits for the task row, then counts the first one's send.
+    monkeypatch.setattr(outbox, "GLOBAL_CAP", 1)
+    mail, events = sending
+    first, second = 8123, 8124
+    cleanup.extend([first, second])
+    _recipient(engine, first)
+    waiting = _recipient(engine, second)
+    # The task row exists, as it does after the first send ever: only its lock makes the second
+    # worker wait, not the first one's insert of it.
+    with engine.begin() as connection:
+        connection.execute(insert(WorkerTask).values(name=outbox.TASK, next_run_at=NOW))
+
+    _race(engine, _sends(mail), "SELECT user_email.address", _sends(mail))
+
+    assert events == ["sent"]
+    with Session(engine) as check:
+        assert check.get_one(EmailOutbox, waiting).state == "queued"

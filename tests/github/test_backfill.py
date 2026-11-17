@@ -635,7 +635,9 @@ def test_two_workers_never_take_the_same_row(engine: Engine) -> None:
 def test_the_worker_backfills_one_repository_per_pass_after_its_tasks(
     sessions: sessionmaker[Session], world: Session, app: GithubApp, github: FakeGithub
 ) -> None:
+    from burnbird.email.outbox import Mail
     from burnbird.worker import run_once
+    from tests.email.examples import RecordingSender
 
     world.add(Backfill(repository_id=5002))
     world.execute(delete(Backfill).where(Backfill.repository_id == REPOSITORY))
@@ -646,7 +648,9 @@ def test_the_worker_backfills_one_repository_per_pass_after_its_tasks(
     github.override = lambda request: (
         httpx2.Response(200, json=[]) if request.url.path == "/app/installations" else None
     )
-    run_once(sessions, app, NOW)
+    run_once(
+        sessions, app, NOW, mail=Mail(sender=RecordingSender(), origin="https://example.invalid")
+    )
     world.expire_all()
     assert len(list(world.scalars(select(Backfill)))) == 1
 

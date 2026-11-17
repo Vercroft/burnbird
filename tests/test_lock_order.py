@@ -769,3 +769,29 @@ def test_the_daily_purge_and_a_backfill_storing_old_jobs(
     with Session(engine) as check:
         # The purge waited for the stores, then deleted both.
         assert not check.scalars(select(Job).where(Job.repository_id == repository_id)).all()
+
+
+def test_the_backfill_queue_and_a_requeue_of_the_same_repository(
+    engine: Engine, cleanup: list[int]
+) -> None:
+    # The re-queue inserts the repository's row; paused before it commits. The queue cannot see
+    # the row, so it inserts one too and waits for the re-queue.
+    user_id, repository_id = 8004, 8005
+    cleanup.append(user_id)
+    installation = _installation(5004, user_id, "User")
+    _stored(engine, installation, repository_id)
+    queued: list[int] = []
+
+    def requeues(session: Session) -> None:
+        backfill.requeue(session, [repository_id])
+        session.execute(text("SELECT 'requeued'"))
+
+    _race(
+        engine,
+        _transaction(requeues),
+        "SELECT 'requeued'",
+        _transaction(lambda session: queued.append(backfill.queue(session))),
+    )
+
+    # The queue skipped the row the re-queue committed.
+    assert queued == [0]

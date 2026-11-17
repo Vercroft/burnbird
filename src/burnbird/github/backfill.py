@@ -123,7 +123,8 @@ def queue(session: Session) -> int:
     """Queue every repository never backfilled that is not queued yet; return how many.
 
     However a repository was first stored (a sign-in, a job's webhook, the reconciliation), it is
-    queued once, and never again after its backfill finished.
+    queued once, and never again after its backfill finished. One a re-queue queues meanwhile is
+    skipped.
     """
     never = select(Repository.id).where(
         Repository.backfilled_at.is_(None),
@@ -132,9 +133,11 @@ def queue(session: Session) -> int:
     # FOR KEY SHARE, the lock the inserts' foreign keys take anyway, but in ID order, as Delete my
     # data locks them, rather than in the order the rows are read.
     lock_repositories(session, never, lock="KEY SHARE")
+    # A repository a re-queue queued meanwhile, not visible to this statement, is skipped.
     queued = session.execute(
         insert(Backfill)
         .from_select([Backfill.repository_id], never)
+        .on_conflict_do_nothing(index_elements=[Backfill.repository_id])
         .returning(Backfill.repository_id)
     )
     return len(queued.all())

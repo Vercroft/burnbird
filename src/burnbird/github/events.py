@@ -189,15 +189,9 @@ def store_installation(session: Session, installation: schemas.Installation) -> 
     )
     if stale is not None:
         retention.uninstall(session, stale)
-    # The plan is the user's choice: it is set only when the account is new.
     session.execute(
         insert(Account)
-        .values(
-            id=account.id,
-            login=account.login,
-            type=account.type,
-            github_plan=schemas.DEFAULT_PLAN[account.type],
-        )
+        .values(**new_account(account))
         .on_conflict_do_update(
             index_elements=[Account.id], set_={"login": account.login, "type": account.type}
         )
@@ -213,6 +207,16 @@ def store_installation(session: Session, installation: schemas.Installation) -> 
         )
         .on_conflict_do_nothing(index_elements=[Installation.id])
     )
+
+
+def new_account(account: schemas.Account) -> dict[str, Any]:
+    """Return a new account's row; the plan is the user's choice, so it is set only when new."""
+    return {
+        "id": account.id,
+        "login": account.login,
+        "type": account.type,
+        "github_plan": schemas.DEFAULT_PLAN[account.type],
+    }
 
 
 def _installation_created(session: Session, data: dict[str, Any]) -> None:

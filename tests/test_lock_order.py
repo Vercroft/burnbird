@@ -482,9 +482,13 @@ def _lists(github: FakeGithub, *installations: schemas.Installation) -> None:
     ]
 
 
-def _reconciles(app: GithubApp) -> Path:
+def _reconciles(app: GithubApp, completes: list[bool] | None = None) -> Path:
+    """Run the reconciliation; record in ``completes`` whether it stored every listed item."""
+
     def run(sessions: sessionmaker[Session]) -> None:
-        reconcile.reconcile(sessions, app, NOW)
+        complete, _ = reconcile.reconcile(sessions, app, NOW)
+        if completes is not None:
+            completes.append(complete)
 
     return run
 
@@ -636,13 +640,7 @@ def test_the_backfill_queue_delete_my_data_and_a_sign_in(
     # the queue's FOR KEY SHARE does not wait for the sign-in.
     user_id, lower, higher = 7990, 7991, 7992
     cleanup.append(user_id)
-    installation = _installation(4990, user_id, "User")
-    _stored(engine, installation, higher, lower)
-    with engine.connect() as connection:
-        order = connection.scalars(
-            select(Repository.id).where(Repository.id.in_([lower, higher])).order_by(text("ctid"))
-        ).all()
-    assert order == [higher, lower]
+    installation = _stored_higher_first(engine, user_id, lower, higher)
 
     _race(
         engine,
@@ -712,3 +710,222 @@ def test_a_sign_in_uninstalling_a_stale_installation_a_requeue_and_delete_my_dat
 
     with Session(engine) as check:
         assert check.get(Installation, stale.id) is None
+
+
+def _job(
+    installation_id: int, repository_id: int, job_id: int, created_at: datetime
+) -> schemas.WorkflowJobCompleted:
+    return schemas.WorkflowJobCompleted(
+        installation=schemas.InstallationRef(id=installation_id),
+        repository=schemas.Repository(id=repository_id, name="app", private=True),
+        workflow_job=schemas.WorkflowJob(
+            id=job_id,
+            run_id=job_id * 10,
+            run_attempt=1,
+            workflow_name="ci",
+            labels=("ubuntu-latest",),
+            runner_id=7,
+            runner_name="GitHub Actions 7",
+            runner_group_name="GitHub Actions",
+            created_at=created_at,
+            started_at=created_at,
+            completed_at=created_at,
+            conclusion="success",
+        ),
+    )
+
+
+def test_the_daily_purge_and_a_backfill_storing_old_jobs(
+    engine: Engine, cleanup: list[int]
+) -> None:
+    # Two jobs past the purge's cutoff, the older stored first, so the purge's DELETE locks it
+    # first in either scan order. One transaction stores them again, the newer first, as a run's
+    # jobs; paused before the older. No path stores jobs this old: the two upserts stand in for
+    # two DELETEs that scan the same jobs in opposite orders, which no test can pause between rows.
+    user_id, repository_id = 8000, 8001
+    cleanup.append(user_id)
+    installation = _installation(5000, user_id, "User")
+    _stored(engine, installation, repository_id)
+    cutoff = NOW - retention.JOB_RETENTION
+    older = _job(installation.id, repository_id, 8002, cutoff - timedelta(days=2))
+    newer = _job(installation.id, repository_id, 8003, cutoff - timedelta(days=1))
+    with sessionmaker(bind=engine).begin() as session:
+        store_job(session, older)
+        store_job(session, newer)
+
+    def stores(session: Session) -> None:
+        store_job(session, newer)
+        store_job(session, older)
+
+    _race(
+        engine,
+        _transaction(stores),
+        _inserts("job", older.workflow_job.id),
+        _transaction(lambda session: retention.run_purges(session, NOW)),
+    )
+
+    with Session(engine) as check:
+        # The purge waited for the stores, then deleted both.
+        assert not check.scalars(select(Job).where(Job.repository_id == repository_id)).all()
+
+
+def test_the_backfill_queue_and_a_requeue_of_the_same_repository(
+    engine: Engine, cleanup: list[int]
+) -> None:
+    # The re-queue inserts the repository's row; paused before it commits. The queue cannot see
+    # the row, so it inserts one too and waits for the re-queue.
+    user_id, repository_id = 8004, 8005
+    cleanup.append(user_id)
+    installation = _installation(5004, user_id, "User")
+    _stored(engine, installation, repository_id)
+    queued: list[int] = []
+
+    def requeues(session: Session) -> None:
+        backfill.requeue(session, [repository_id])
+        session.execute(text("SELECT 'requeued'"))
+
+    _race(
+        engine,
+        _transaction(requeues),
+        "SELECT 'requeued'",
+        _transaction(lambda session: queued.append(backfill.queue(session))),
+    )
+
+    # The queue skipped the row the re-queue committed.
+    assert queued == [0]
+
+
+def _requeues_lower_then_higher(lower: int, higher: int) -> tuple[Path, Pause]:
+    """Re-queue the lower repository, then the higher; paused before the higher one's insert."""
+
+    def requeues(session: Session) -> None:
+        backfill.requeue(session, [lower])
+        backfill.requeue(session, [higher])
+
+    def before_higher(statement: str, parameters: Any) -> bool:
+        return statement.startswith("INSERT INTO backfill") and higher in parameters.values()
+
+    return _transaction(requeues), before_higher
+
+
+def _stored_higher_first(
+    engine: Engine, user_id: int, lower: int, higher: int
+) -> schemas.Installation:
+    """Store a personal installation and two repositories, the higher one physically first.
+
+    The repository table is emptied first: Postgres puts a new row wherever it finds free space,
+    so after other tests' rows the second can land before the first. An empty table takes them
+    on its first page, in insert order.
+    """
+    with engine.begin() as connection:
+        connection.execute(text("TRUNCATE repository CASCADE"))
+    installation = _installation(user_id - 3000, user_id, "User")
+    _stored(engine, installation, higher, lower)
+    with engine.connect() as connection:
+        order = connection.scalars(
+            select(Repository.id).where(Repository.id.in_([lower, higher])).order_by(text("ctid"))
+        ).all()
+    assert order == [higher, lower]
+    return installation
+
+
+def test_the_backfill_queue_and_a_requeue_insert_in_id_order(
+    engine: Engine, cleanup: list[int]
+) -> None:
+    # The higher repository is stored first, so a queue that inserts in the order it reads takes
+    # the higher row first, then waits for the re-queue's lower one.
+    user_id, lower, higher = 8006, 8007, 8008
+    cleanup.append(user_id)
+    _stored_higher_first(engine, user_id, lower, higher)
+    queued: list[int] = []
+
+    _race(
+        engine,
+        *_requeues_lower_then_higher(lower, higher),
+        _transaction(lambda session: queued.append(backfill.queue(session))),
+    )
+
+    # The queue waited for the re-queue and skipped both rows it committed.
+    assert queued == [0]
+
+
+def test_two_requeues_insert_in_id_order(engine: Engine, cleanup: list[int]) -> None:
+    # The same with a re-queue of both. Without index scans its select reads in physical order,
+    # a plan Postgres may choose: nothing else puts the rows in ID order.
+    user_id, lower, higher = 8009, 8010, 8011
+    cleanup.append(user_id)
+    _stored_higher_first(engine, user_id, lower, higher)
+
+    def requeues_both(session: Session) -> None:
+        session.execute(text("SET LOCAL enable_indexscan = off"))
+        session.execute(text("SET LOCAL enable_bitmapscan = off"))
+        backfill.requeue(session, [lower, higher])
+
+    _race(engine, *_requeues_lower_then_higher(lower, higher), _transaction(requeues_both))
+
+    with Session(engine) as check:
+        generations = check.scalars(
+            select(Backfill.generation)
+            .where(Backfill.repository_id.in_([lower, higher]))
+            .order_by(Backfill.repository_id)
+        ).all()
+    # The second re-queue waited for the first and raised both rows' generation.
+    assert generations == [1, 1]
+
+
+def test_the_reconciliation_storing_a_new_lower_account_and_a_sign_in(
+    engine: Engine, cleanup: list[int], github_app: tuple[FakeGithub, GithubApp]
+) -> None:
+    # GitHub lists a new account's installation and a stored higher account's. The new account
+    # was installed again meanwhile: the sign-in lists its newer installation, and the higher one.
+    # Paused before the reconciliation inserts the new account.
+    github, app = github_app
+    user_id, new, higher = 8012, 8013, 8014
+    cleanup.extend([user_id, new, higher])
+    stored = _installation(5014, higher, "Organization")
+    listed = _installation(5013, new, "Organization")
+    again = _installation(5015, new, "Organization")
+    _stored(engine, stored)
+    _lists(github, listed, stored)
+    completes: list[bool] = []
+
+    _race(
+        engine,
+        _reconciles(app, completes),
+        _inserts("account", new),
+        _signs_in(_sign_in(user_id, (again, stored))),
+    )
+
+    with Session(engine) as check:
+        # The sign-in stored the new account first; the reconciliation left it as it was.
+        assert check.get(Installation, again.id) is not None
+        assert check.get(Installation, listed.id) is None
+        assert check.get(Installation, stored.id) is not None
+    # The new account's installation was left to the next run.
+    assert completes == [False]
+
+
+def test_the_reconciliation_and_a_sign_in_installing_a_new_account_again(
+    engine: Engine, cleanup: list[int], github_app: tuple[FakeGithub, GithubApp]
+) -> None:
+    # GitHub lists a new account's installation; the sign-in stores a newer one for the same
+    # account and is paused before it commits.
+    github, app = github_app
+    user_id, new = 8015, 8016
+    cleanup.extend([user_id, new])
+    listed = _installation(5016, new, "Organization")
+    again = _installation(5017, new, "Organization")
+    _lists(github, listed)
+    completes: list[bool] = []
+
+    _race(
+        engine,
+        _signs_in(_sign_in(user_id, (again,))),
+        "INSERT INTO github_user",
+        _reconciles(app, completes),
+    )
+
+    with Session(engine) as check:
+        assert check.get(Installation, again.id) is not None
+        assert check.get(Installation, listed.id) is None
+    assert completes == [False]

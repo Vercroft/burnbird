@@ -11,11 +11,18 @@ its jobs since the cycle start (``burnbird.github.backfill``).
 These rules keep a deletion safe:
 - **Snapshot first.** The stored IDs are read before GitHub is asked, and only those can be
   deleted: a row stored while the list was being fetched (by a webhook or a sign-in) is newer than
-  the list, so it stays. For the same reason a listed installation deleted during the fetch is not
-  stored again, and one whose account has another installation stored is not stored at all:
-  storing it would uninstall the other one outside these rules. Repositories follow the same rule:
-  one removed from the installation or moved to another during the fetch is not stored again, and
-  an installation uninstalled during its repository fetch gets nothing written.
+  the list, so it stays. For the same reason a listed installation that was in the snapshot and was
+  deleted during the fetch is not stored again, and one whose account has another installation
+  stored is not stored at all: storing it would uninstall the other one outside these rules. One
+  whose account is not stored is stored in its own transaction, and only if that creates the
+  account: an account another path stored meanwhile came with its own installation, and this one
+  is left to the next run. An installation of a new account that is deleted after GitHub listed it
+  and before it is stored (one created and deleted while the list was fetched, say) is not in the
+  snapshot, so it is still stored; the next run uninstalls it as below, as any installation GitHub
+  no longer lists.
+  Repositories follow the same rule: one removed from the installation or moved to another during
+  the fetch is not stored again, and an installation uninstalled during its repository fetch gets
+  nothing written.
 - **Every page first.** A list is collected in full before anything is written; a failure on any
   page changes nothing.
 - **Ask before uninstalling.** Lists are paged by number, so an item can move onto a page already
@@ -41,6 +48,7 @@ from typing import Any, Final
 import httpx2
 from pydantic import ValidationError
 from sqlalchemy import or_, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird import retention
@@ -51,7 +59,7 @@ from burnbird.github.client import (
     InstallationRefusedError,
     RateLimitedError,
 )
-from burnbird.github.events import store_installation, store_repository
+from burnbird.github.events import new_account, store_installation, store_repository
 from burnbird.models import Account, Installation, Repository
 
 logger = logging.getLogger(__name__)
@@ -217,31 +225,37 @@ def _store_installations(
 ) -> tuple[frozenset[int], bool]:
     """Uninstall the ``gone`` installations, then store the listed ones that are safe to store.
 
-    Returns the installations stored or updated, and whether every listed one was.
+    One whose account is not stored is stored afterwards, in its own transaction
+    (``_store_new_account``): this one locks only accounts that exist. Returns the installations
+    stored or updated, and whether every listed one was.
     """
     written: set[int] = set()
+    new: list[schemas.Installation] = []
     with sessions.begin() as session:
         # In the lock order (``retention.lock_repositories``): every gone installation's
-        # repositories, then every account this run uninstalls or stores, in ID order, before
-        # anything is written. Accounts are stored in ID order too, so new ones are inserted in it.
+        # repositories, then every stored account this run uninstalls or stores to, in ID order,
+        # before anything is written. An account not stored yet has no row to lock: it is stored
+        # afterwards, in its own transaction.
         retention.lock_repositories(
             session,
             select(Repository.id).where(Repository.installation_id.in_(gone)),
             lock="UPDATE",
         )
-        session.execute(
-            select(Account.id)
-            .where(
-                or_(
-                    Account.id.in_([i.account.id for i in listed.installations]),
-                    Account.id.in_(
-                        select(Installation.account_id).where(Installation.id.in_(gone))
-                    ),
+        locked = frozenset(
+            session.scalars(
+                select(Account.id)
+                .where(
+                    or_(
+                        Account.id.in_([i.account.id for i in listed.installations]),
+                        Account.id.in_(
+                            select(Installation.account_id).where(Installation.id.in_(gone))
+                        ),
+                    )
                 )
+                .order_by(Account.id)
+                .with_for_update()
             )
-            .order_by(Account.id)
-            .with_for_update()
-        ).all()
+        )
         for installation_id in sorted(gone):
             retention.uninstall(session, installation_id)
         rows = session.execute(select(Installation.id, Installation.account_id))
@@ -254,6 +268,9 @@ def _store_installations(
                     "reconcile: installation %d was deleted while it was listed; not stored",
                     installation.id,
                 )
+                continue
+            if installation.account.id not in locked:
+                new.append(installation)
                 continue
             if other != installation.id:
                 logger.warning(
@@ -269,6 +286,7 @@ def _store_installations(
                 .values(suspended=installation.suspended_at is not None)
             )
             written.add(installation.id)
+    written.update(i.id for i in new if _store_new_account(sessions, i))
     logger.info(
         "reconcile: %d installations listed (%d skipped), %d uninstalled",
         len(listed.ids),
@@ -276,6 +294,34 @@ def _store_installations(
         len(gone),
     )
     return frozenset(written), len(written) == len(listed.installations)
+
+
+def _store_new_account(
+    sessions: sessionmaker[Session], installation: schemas.Installation
+) -> bool:
+    """Store an installation whose account was not stored, only if this creates the account.
+
+    Then no other installation can be stored for it, so ``store_installation`` uninstalls none.
+    This transaction can wait only for another insert of the same account, and holds nothing
+    while it does. An account another path stored meanwhile came with its own installation: this
+    one is left to the next run. Returns whether it was stored.
+    """
+    with sessions.begin() as session:
+        created = session.scalar(
+            insert(Account)
+            .values(**new_account(installation.account))
+            .on_conflict_do_nothing(index_elements=[Account.id])
+            .returning(Account.id)
+        )
+        if created is None:
+            logger.warning(
+                "reconcile: installation %d not stored: its account %d was stored meanwhile",
+                installation.id,
+                installation.account.id,
+            )
+            return False
+        store_installation(session, installation)
+    return True
 
 
 def _reconcile_repositories(

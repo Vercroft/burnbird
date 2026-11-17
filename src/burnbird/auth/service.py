@@ -28,7 +28,7 @@ import httpx2
 from authlib.integrations.starlette_client import OAuth  # type: ignore[import-untyped]  # Authlib ships no type information
 from authlib.integrations.starlette_client import OAuthError as OAuthError
 from pydantic import TypeAdapter, ValidationError
-from sqlalchemy import delete, or_, select
+from sqlalchemy import case, delete, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -346,11 +346,19 @@ def _store_email(session: Session, user_id: int, address: str | None, now: datet
     if address is None:
         session.execute(delete(UserEmail).where(UserEmail.user_id == user_id))
         return
+    stored = insert(UserEmail).values(user_id=user_id, address=address, read_at=now)
+    # A pause (a bounce, a spam report) belongs to the address it came from: a new address
+    # starts without one.
+    same = UserEmail.address == stored.excluded.address
     session.execute(
-        insert(UserEmail)
-        .values(user_id=user_id, address=address, read_at=now)
-        .on_conflict_do_update(
-            index_elements=[UserEmail.user_id], set_={"address": address, "read_at": now}
+        stored.on_conflict_do_update(
+            index_elements=[UserEmail.user_id],
+            set_={
+                "address": address,
+                "read_at": now,
+                "suppressed_at": case((same, UserEmail.suppressed_at)),
+                "suppressed_reason": case((same, UserEmail.suppressed_reason)),
+            },
         )
     )
     # The first stored address brings the default email choices; later ones keep the user's.

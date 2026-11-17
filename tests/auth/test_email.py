@@ -150,6 +150,36 @@ def test_a_changed_address_replaces_the_stored_one(
     assert len(session.scalars(select(UserEmail)).all()) == 1
 
 
+def _suppress(session: Session) -> None:
+    stored = _stored(session)
+    assert stored is not None
+    stored.suppressed_at = NOW
+    stored.suppressed_reason = "hard_bounce"
+    session.flush()
+
+
+def test_a_changed_address_is_no_longer_suppressed(
+    github: FakeGithub, sign_in: SignIn, session: Session
+) -> None:
+    # The pause was for the old address: the new one has never bounced.
+    _signed_in(sign_in)
+    _suppress(session)
+    github.emails = [email_item(invented_address())]
+    _signed_in(sign_in)
+    stored = _stored(session)
+    assert stored is not None
+    assert (stored.suppressed_at, stored.suppressed_reason) == (None, None)
+
+
+def test_the_same_address_stays_suppressed(sign_in: SignIn, session: Session) -> None:
+    _signed_in(sign_in)
+    _suppress(session)
+    _signed_in(sign_in)
+    stored = _stored(session)
+    assert stored is not None
+    assert (stored.suppressed_at, stored.suppressed_reason) == (NOW, "hard_bounce")
+
+
 @pytest.mark.parametrize(
     "answer",
     [None, httpx2.Response(403, json={}), httpx2.Response(500, json={})],

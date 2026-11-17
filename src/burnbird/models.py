@@ -54,6 +54,13 @@ class Base(DeclarativeBase):
 # The kinds of email a user chooses, and where a recorded choice came from.
 EMAIL_KINDS: Final = ("usage_warnings", "weekly_summary", "news")
 CONSENT_SOURCES: Final = ("default", "settings", "one_click", "complaint")
+# The kinds the outbox sends: service email, always sent, and run-out warnings. News is never sent
+# through it: the provider takes transactional email only.
+OUTBOX_KINDS: Final = ("service", "usage_warnings")
+OUTBOX_TEMPLATES: Final = ("run_out_warning",)
+OUTBOX_STATES: Final = ("queued", "sent", "unknown", "failed", "skipped")
+# Why email to an address stopped: it bounced for good, or the user marked a message as spam.
+SUPPRESSION_REASONS: Final = ("hard_bounce", "complaint")
 
 # The longest email address ``user_email`` stores; its CHECK and sign-in's own check share it.
 EMAIL_MAX_LENGTH: Final = 254
@@ -241,12 +248,18 @@ class UserSession(Base):
     device: Mapped[str | None]
 
 
+def _one_of(column: str, values: tuple[str, ...]) -> CheckConstraint:
+    listed = ", ".join(f"'{value}'" for value in values)
+    return CheckConstraint(f"{column} IN ({listed})", name=column)
+
+
 class UserEmail(Base):
     """A user's GitHub primary verified email address, as read at their last sign-in.
 
     Only an address GitHub marks both primary and verified is stored, so there is no flag for
     either. ``read_at`` is when a sign-in last read it; one not read again within
-    ``retention.EMAIL_FRESHNESS`` is deleted.
+    ``retention.EMAIL_FRESHNESS`` is deleted. ``suppressed_at`` and its reason mark an address no
+    email is sent to: it bounced for good, or the user marked a message as spam.
     """
 
     __tablename__ = "user_email"
@@ -256,6 +269,10 @@ class UserEmail(Base):
             f"char_length(address) <= {EMAIL_MAX_LENGTH} AND position('@' in address) > 1",
             name="address",
         ),
+        _one_of("suppressed_reason", SUPPRESSION_REASONS),
+        CheckConstraint(
+            "(suppressed_at IS NULL) = (suppressed_reason IS NULL)", name="suppressed"
+        ),
     )
 
     user_id: Mapped[int] = mapped_column(
@@ -263,11 +280,8 @@ class UserEmail(Base):
     )
     address: Mapped[str]
     read_at: Mapped[datetime] = mapped_column(index=True)
-
-
-def _one_of(column: str, values: tuple[str, ...]) -> CheckConstraint:
-    listed = ", ".join(f"'{value}'" for value in values)
-    return CheckConstraint(f"{column} IN ({listed})", name=column)
+    suppressed_at: Mapped[datetime | None]
+    suppressed_reason: Mapped[str | None]
 
 
 class EmailPreference(Base):
@@ -302,6 +316,52 @@ class EmailConsent(Base):
     source: Mapped[str]
     text_version: Mapped[str]
     at: Mapped[datetime]
+
+
+class EmailOutbox(Base):
+    """One email to send, written in the transaction that decides to send it.
+
+    ``dedupe_key`` makes a second decision for the same email a no-op. ``params`` holds IDs,
+    kinds and dates, never an address or a login. ``outcome`` is a short code (for example
+    ``http:400`` or ``suppressed``), never the provider's text. A usage email's unsubscribe link
+    is stored as the SHA-256 of its token only, as a session is. A finished row is kept 62 days
+    (``retention.OUTBOX_RETENTION``).
+    """
+
+    __tablename__ = "email_outbox"
+    __table_args__ = (
+        _one_of("kind", OUTBOX_KINDS),
+        _one_of("template", OUTBOX_TEMPLATES),
+        _one_of("state", OUTBOX_STATES),
+        CheckConstraint("octet_length(unsubscribe_sha256) = 32", name="unsubscribe_sha256"),
+        # A queued row is not finished; a final one says when it finished, so the purge finds it.
+        CheckConstraint("(state = 'queued') = (finished_at IS NULL)", name="finished"),
+        # The rows a worker may claim.
+        Index(None, "retry_at", postgresql_where=text("state = 'queued'")),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("github_user.id", ondelete="CASCADE"), index=True
+    )
+    # The account a usage email is about.
+    account_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("account.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str]
+    template: Mapped[str]
+    dedupe_key: Mapped[str] = mapped_column(unique=True)
+    params: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime]
+    expires_at: Mapped[datetime]
+    retry_at: Mapped[datetime | None]
+    attempts: Mapped[int] = mapped_column(SmallInteger, server_default=text("0"))
+    state: Mapped[str] = mapped_column(server_default=text("'queued'"))
+    outcome: Mapped[str | None]
+    # When the row reached a final state; the rolling caps and the 62-day purge count from it.
+    finished_at: Mapped[datetime | None] = mapped_column(index=True)
+    unsubscribe_sha256: Mapped[bytes | None] = mapped_column(LargeBinary, unique=True)
+    provider_request_id: Mapped[str | None]
 
 
 class WebhookDelivery(Base):

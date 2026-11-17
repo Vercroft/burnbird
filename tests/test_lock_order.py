@@ -26,7 +26,7 @@ from burnbird.auth.service import ListedRepository, SignIn, session_digest, stor
 from burnbird.email.preferences import set_choice
 from burnbird.github import backfill, reconcile, schemas
 from burnbird.github.client import GithubApp
-from burnbird.github.events import store_job
+from burnbird.github.events import HANDLERS, store_job
 from burnbird.models import (
     Account,
     Backfill,
@@ -887,22 +887,20 @@ def test_the_reconciliation_storing_a_new_lower_account_and_a_sign_in(
     again = _installation(5015, new, "Organization")
     _stored(engine, stored)
     _lists(github, listed, stored)
-    completes: list[bool] = []
 
     _race(
         engine,
-        _reconciles(app, completes),
+        _reconciles(app),
         _inserts("account", new),
         _signs_in(_sign_in(user_id, (again, stored))),
     )
 
     with Session(engine) as check:
-        # The sign-in stored the new account first; the reconciliation left it as it was.
+        # The reconciliation stored the new account first, under its installation lock; the
+        # sign-in waited for it, then uninstalled its installation in the lock order.
         assert check.get(Installation, again.id) is not None
         assert check.get(Installation, listed.id) is None
         assert check.get(Installation, stored.id) is not None
-    # The new account's installation was left to the next run.
-    assert completes == [False]
 
 
 def test_the_reconciliation_and_a_sign_in_installing_a_new_account_again(
@@ -929,3 +927,141 @@ def test_the_reconciliation_and_a_sign_in_installing_a_new_account_again(
         assert check.get(Installation, again.id) is not None
         assert check.get(Installation, listed.id) is None
     assert completes == [False]
+
+
+def _installation_created(installation: schemas.Installation) -> Callable[[Session], None]:
+    """The webhook's ``installation.created`` handler for this installation."""
+    payload = {"installation": installation.model_dump(mode="json")}
+    return lambda session: HANDLERS[("installation", "created")](session, payload)
+
+
+def test_a_sign_in_and_the_reconciliation_storing_the_same_new_account(
+    engine: Engine, cleanup: list[int], github_app: tuple[FakeGithub, GithubApp]
+) -> None:
+    # The reconciliation stores a new account's installation; paused before its installation
+    # insert. The account was installed again: the sign-in lists the newer installation.
+    github, app = github_app
+    user_id, new = 8100, 8101
+    cleanup.extend([user_id, new])
+    listed = _installation(5100, new, "Organization")
+    again = _installation(5101, new, "Organization")
+    _lists(github, listed)
+
+    _race(
+        engine,
+        _reconciles(app),
+        _inserts("installation", listed.id),
+        _signs_in(_sign_in(user_id, (again,))),
+    )
+
+    with Session(engine) as check:
+        # The sign-in waited for the reconciliation, then uninstalled its installation.
+        assert check.get(Installation, again.id) is not None
+        assert check.get(Installation, listed.id) is None
+
+
+def test_a_sign_in_and_a_webhook_storing_the_same_new_account(
+    engine: Engine, cleanup: list[int]
+) -> None:
+    # The same with the webhook's installation.created, paused before its installation insert.
+    user_id, new = 8102, 8103
+    cleanup.extend([user_id, new])
+    created = _installation(5102, new, "Organization")
+    again = _installation(5103, new, "Organization")
+
+    _race(
+        engine,
+        _transaction(_installation_created(created)),
+        _inserts("installation", created.id),
+        _signs_in(_sign_in(user_id, (again,))),
+    )
+
+    with Session(engine) as check:
+        assert check.get(Installation, again.id) is not None
+        assert check.get(Installation, created.id) is None
+
+
+def test_a_sign_in_uninstalling_an_installation_stored_after_its_read(
+    engine: Engine, cleanup: list[int], github_app: tuple[FakeGithub, GithubApp]
+) -> None:
+    # The sign-in lists a stored lower account with its repository, and a new account; paused
+    # before it reads the new account's stale installation, holding the repository and the lower
+    # account. A webhook then stores another installation for the new account, and a job stores a
+    # lower repository under it. The reconciliation's repository step for that installation, whose
+    # list holds both repositories (the higher one moved to it), takes the lower one and waits for
+    # the higher. The step runs on its own: a whole run would first wait for the accounts.
+    github, app = github_app
+    user_id, lower, new = 8104, 8106, 8107
+    late_repository, repository_id = 8108, 8109
+    cleanup.extend([user_id, lower, new])
+    stored = _installation(5106, lower, "Organization")
+    again = _installation(5107, new, "Organization")
+    created = _installation(5108, new, "Organization")
+    _stored(engine, stored, repository_id)
+    github.repositories = {
+        created.id: [repository_item(late_repository), repository_item(repository_id)]
+    }
+
+    def webhook(session: Session) -> None:
+        _installation_created(created)(session)
+        store_job(session, _job(created.id, late_repository, 8110, NOW))
+
+    _race(
+        engine,
+        _signs_in(_sign_in(user_id, (stored, again), (stored.id, repository_id))),
+        lambda statement, parameters: (
+            statement.startswith("SELECT installation.id")
+            and "installation.account_id = " in statement
+            and new in parameters.values()
+        ),
+        _transaction(webhook),
+        lambda sessions: reconcile._reconcile_repositories(sessions, app, created.id, NOW),
+    )
+
+    with Session(engine) as check:
+        # The webhook waited for the sign-in and stored its installation after it.
+        assert check.get(Installation, created.id) is not None
+        assert check.get(Installation, again.id) is None
+        assert check.get_one(Repository, late_repository).installation_id == created.id
+
+
+def test_a_sign_in_and_the_reconciliation_installing_an_account_again(
+    engine: Engine, cleanup: list[int], github_app: tuple[FakeGithub, GithubApp]
+) -> None:
+    # An account was installed again: GitHub lists its new installation and answers 404 for the
+    # stored one, which the reconciliation uninstalls; paused just after. The sign-in lists a
+    # stored lower account and a newer installation still: it reads the stored one as stale and
+    # waits for its repository. It must uninstall only what it read and locked first.
+    github, app = github_app
+    user_id, lower, account_id, repository_id = 8115, 8116, 8117, 8118
+    cleanup.extend([user_id, lower, account_id])
+    kept = _installation(5116, lower, "Organization")
+    old = _installation(5117, account_id, "Organization")
+    listed = _installation(5118, account_id, "Organization")
+    newer = _installation(5119, account_id, "Organization")
+    _stored(engine, kept)
+    _stored(engine, old, repository_id)
+    _lists(github, kept, listed)
+    uninstalled: list[int] = []
+
+    def signs_in(sessions: sessionmaker[Session]) -> None:
+        def record(*args: Any) -> None:
+            statement, parameters = args[2], args[3]
+            if statement.startswith("SELECT installation.account_id"):
+                uninstalled.extend(parameters.values())
+
+        event.listen(sessions.kw["bind"], "before_cursor_execute", record)
+        store_sign_in(sessions, _sign_in(user_id, (kept, newer)), NOW, None)
+
+    _race(
+        engine,
+        _reconciles(app),
+        "SELECT installation.id, installation.account_id",
+        signs_in,
+    )
+
+    # The reconciliation uninstalled the old installation; the sign-in had nothing more to.
+    assert uninstalled == []
+    with Session(engine) as check:
+        assert check.get(Installation, newer.id) is not None
+        assert check.get(Installation, listed.id) is None

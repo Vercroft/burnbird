@@ -175,9 +175,13 @@ def store_repository(
 def store_installation(session: Session, installation: schemas.Installation) -> None:
     """Store an installation and its account; a repeat leaves a stored one as it is.
 
-    The webhook's ``installation.created`` and a sign-in's list of installations both use it. A
-    sign-in locks a stale installation's repositories before any account, so the uninstall here
-    keeps the lock order (``retention.lock_repositories``).
+    The webhook's ``installation.created``, a sign-in and the reconciliation's
+    ``_store_new_account`` take the account's installation lock first
+    (``retention.lock_installations_of``), so the other installation read here cannot change before
+    this one is stored. The reconciliation's main transaction stores only to stored accounts it
+    holds FOR UPDATE, which makes those paths wait. A sign-in locks a stale installation's
+    repositories before any account, so the uninstall here keeps the lock order
+    (``retention.lock_repositories``).
     """
     account = installation.account
     # An account holds one installation. Another one stored for it means its "deleted" delivery
@@ -220,7 +224,9 @@ def new_account(account: schemas.Account) -> dict[str, Any]:
 
 
 def _installation_created(session: Session, data: dict[str, Any]) -> None:
-    store_installation(session, schemas.InstallationCreated.model_validate(data).installation)
+    installation = schemas.InstallationCreated.model_validate(data).installation
+    retention.lock_installations_of(session, [installation.account.id])
+    store_installation(session, installation)
 
 
 def _installation_deleted(session: Session, data: dict[str, Any]) -> None:

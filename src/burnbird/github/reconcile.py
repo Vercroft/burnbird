@@ -14,12 +14,12 @@ These rules keep a deletion safe:
   the list, so it stays. For the same reason a listed installation that was in the snapshot and was
   deleted during the fetch is not stored again, and one whose account has another installation
   stored is not stored at all: storing it would uninstall the other one outside these rules. One
-  whose account is not stored is stored in its own transaction, and only if that creates the
-  account: an account another path stored meanwhile came with its own installation, and this one
-  is left to the next run. An installation of a new account that is deleted after GitHub listed it
-  and before it is stored (one created and deleted while the list was fetched, say) is not in the
-  snapshot, so it is still stored; the next run uninstalls it as below, as any installation GitHub
-  no longer lists.
+  whose account is not stored, or whose old installation this run uninstalls, is stored in its own
+  transaction, and only if that creates the account: an account another path stored meanwhile
+  came with its own installation, and this one is left to the next run. An installation of a new
+  account that is deleted after GitHub listed it and before it is stored (one created and deleted
+  while the list was fetched, say) is not in the snapshot, so it is still stored; the next run
+  uninstalls it as below, as any installation GitHub no longer lists.
   Repositories follow the same rule: one removed from the installation or moved to another during
   the fetch is not stored again, and an installation uninstalled during its repository fetch gets
   nothing written.
@@ -225,9 +225,10 @@ def _store_installations(
 ) -> tuple[frozenset[int], bool]:
     """Uninstall the ``gone`` installations, then store the listed ones that are safe to store.
 
-    One whose account is not stored is stored afterwards, in its own transaction
-    (``_store_new_account``): this one locks only accounts that exist. Returns the installations
-    stored or updated, and whether every listed one was.
+    One whose account is not stored, or is uninstalled here, is stored afterwards, in its own
+    transaction (``_store_new_account``): this one locks only accounts that exist, and stores only
+    to accounts it holds and keeps. Returns the installations stored or updated, and whether every
+    listed one was.
     """
     written: set[int] = set()
     new: list[schemas.Installation] = []
@@ -256,6 +257,10 @@ def _store_installations(
                 .with_for_update()
             )
         )
+        # An account uninstalled here and listed again is stored like a new one, afterwards.
+        uninstalled = frozenset(
+            session.scalars(select(Installation.account_id).where(Installation.id.in_(gone)))
+        )
         for installation_id in sorted(gone):
             retention.uninstall(session, installation_id)
         rows = session.execute(select(Installation.id, Installation.account_id))
@@ -269,7 +274,7 @@ def _store_installations(
                     installation.id,
                 )
                 continue
-            if installation.account.id not in locked:
+            if installation.account.id not in locked or installation.account.id in uninstalled:
                 new.append(installation)
                 continue
             if other != installation.id:
@@ -302,11 +307,13 @@ def _store_new_account(
     """Store an installation whose account was not stored, only if this creates the account.
 
     Then no other installation can be stored for it, so ``store_installation`` uninstalls none.
-    This transaction can wait only for another insert of the same account, and holds nothing
-    while it does. An account another path stored meanwhile came with its own installation: this
+    The account's installation lock is taken first (``retention.lock_installations_of``), so a
+    sign-in or webhook storing the same account waits for this one, or this one for it, holding
+    nothing. An account another path stored meanwhile came with its own installation: this
     one is left to the next run. Returns whether it was stored.
     """
     with sessions.begin() as session:
+        retention.lock_installations_of(session, [installation.account.id])
         created = session.scalar(
             insert(Account)
             .values(**new_account(installation.account))

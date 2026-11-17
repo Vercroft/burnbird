@@ -1279,24 +1279,34 @@ def test_two_workers_at_the_cap_send_once(
     sending: tuple[Mail, list[str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Room for one more email. The first worker holds the task row during its send; the second
-    # claims the other email, waits for the task row, then counts the first one's send.
+    # Room for one more email. The first worker has checked the cap and sent, and is paused
+    # before it records the outcome, still holding the task row; the second claims the other
+    # email, waits for the task row, then counts the first one's send. Without that lock the
+    # second would pass the cap check too and send a second email. Both emails are queued at the
+    # same time, so which worker takes which is not fixed: a tie in the claim's ORDER BY falls to
+    # the rows' place in the table, which a row deleted and vacuumed by an earlier test can
+    # change. Only the outcome is checked: one sent, one still queued.
     monkeypatch.setattr(outbox, "GLOBAL_CAP", 1)
     mail, events = sending
     first, second = 8123, 8124
     cleanup.extend([first, second])
-    _recipient(engine, first)
-    waiting = _recipient(engine, second)
+    emails = [_recipient(engine, first), _recipient(engine, second)]
     # The task row exists, as it does after the first send ever: only its lock makes the second
     # worker wait, not the first one's insert of it.
     with engine.begin() as connection:
         connection.execute(insert(WorkerTask).values(name=outbox.TASK, next_run_at=NOW))
 
-    _race(engine, _sends(mail), "SELECT user_email.address", _sends(mail))
+    _race(
+        engine,
+        _sends(mail),
+        lambda statement, _: statement.startswith("UPDATE email_outbox") and "state=" in statement,
+        _sends(mail),
+    )
 
     assert events == ["sent"]
     with Session(engine) as check:
-        assert check.get_one(EmailOutbox, waiting).state == "queued"
+        states = sorted(check.get_one(EmailOutbox, email).state for email in emails)
+        assert states == ["queued", "sent"]
 
 
 def test_an_unsubscribe_and_delete_my_data(engine: Engine, cleanup: list[int]) -> None:

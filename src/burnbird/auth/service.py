@@ -44,7 +44,7 @@ from burnbird.github.client import (
     rate_limit_resume,
 )
 from burnbird.github.client import GithubAnswerError as GithubAnswerError
-from burnbird.github.events import store_installation, store_repository
+from burnbird.github.events import store_installation, store_repositories
 from burnbird.models import (
     GithubUser,
     Installation,
@@ -55,7 +55,7 @@ from burnbird.models import (
     UserSession,
     storable_address,
 )
-from burnbird.retention import lock_repositories
+from burnbird.retention import lock_installations_of, lock_repositories
 
 logger = logging.getLogger(__name__)
 
@@ -270,14 +270,18 @@ def store_sign_in(
     user_id = sign_in.user_id
     repositories = sorted(sign_in.repositories, key=lambda listed: listed.repository.id)
     with sessions.begin() as session:
-        # In the lock order (``lock_repositories``), as Delete my data takes it: the stored
-        # repositories, then the accounts, then the user row, then the user's own rows. FOR NO KEY
-        # UPDATE is the lock the repository upsert takes anyway, so it holds nothing up that the
-        # upsert would not: a re-queue's FOR KEY SHARE goes on, Delete my data's FOR UPDATE waits.
+        # In the lock order (``lock_repositories``): first every listed account's installation
+        # lock, so no other path stores an installation for one of them until this commits, and
+        # the stale installations read next stay as read. Then, as Delete my data takes them, the
+        # stored repositories, then the accounts, then the user row, then the user's own rows.
+        # FOR NO KEY UPDATE is the lock the repository upsert takes anyway, so it holds nothing up
+        # that the upsert would not: a re-queue's FOR KEY SHARE goes on, Delete my data's FOR
+        # UPDATE waits.
         # The repositories of a stale installation (``store_installation`` uninstalls it) are
         # locked here too, before any account, and then FOR UPDATE, the lock its deletes take:
         # upgrading later would wait for a FOR KEY SHARE taken meanwhile, whose path may wait for
         # this one.
+        lock_installations_of(session, [i.account.id for i in sign_in.installations])
         stale = session.scalars(
             select(Installation.id).where(
                 Installation.account_id.in_([i.account.id for i in sign_in.installations]),
@@ -293,8 +297,10 @@ def store_sign_in(
         lock_repositories(session, locked, lock="UPDATE" if stale else "NO KEY UPDATE")
         for installation in sorted(sign_in.installations, key=lambda i: i.account.id):
             store_installation(session, installation)
-        for listed in repositories:
-            store_repository(session, listed.installation_id, listed.repository)
+        # In ID order, in one pipelined call (``store_repositories``).
+        store_repositories(
+            session, [(listed.installation_id, listed.repository) for listed in repositories]
+        )
         session.execute(
             insert(GithubUser)
             .values(id=user_id, login=sign_in.login, last_sign_in_at=now)

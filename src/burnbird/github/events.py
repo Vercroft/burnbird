@@ -10,7 +10,7 @@ upsert or a keyed delete, so a repeat is safe.
 """
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import Any, Final
@@ -28,6 +28,18 @@ from burnbird.models import Account, Installation, Job, LabelSize, Repository, W
 logger = logging.getLogger(__name__)
 
 MAX_ATTEMPTS: Final = 5
+
+_NEW_REPOSITORY: Final = insert(Repository)
+# A repository's upsert, the one definition: a new row, or the stored row's installation, name and
+# privacy updated.
+_REPOSITORY_UPSERT: Final = _NEW_REPOSITORY.on_conflict_do_update(
+    index_elements=[Repository.id],
+    set_={
+        "installation_id": _NEW_REPOSITORY.excluded.installation_id,
+        "name": _NEW_REPOSITORY.excluded.name,
+        "private": _NEW_REPOSITORY.excluded.private,
+    },
+)
 
 
 class UnknownInstallationError(Exception):
@@ -158,26 +170,48 @@ def store_repository(
 ) -> None:
     """Store a repository under its installation, or update its name, privacy and installation.
 
-    A job's delivery, a sign-in's list and the hourly reconciliation all use it.
+    A job's delivery and the hourly reconciliation use it; a sign-in stores its list with
+    ``store_repositories``.
     """
-    values = {
-        "installation_id": installation_id,
-        "name": repository.name,
-        "private": repository.private,
-    }
-    session.execute(
-        insert(Repository)
-        .values(id=repository.id, **values)
-        .on_conflict_do_update(index_elements=[Repository.id], set_=values)
-    )
+    store_repositories(session, [(installation_id, repository)])
+
+
+def store_repositories(
+    session: Session, repositories: Sequence[tuple[int, schemas.Repository]]
+) -> None:
+    """Upsert (installation ID, repository) pairs, in the order given.
+
+    A new repository is inserted; a stored one gets the listed installation, name and privacy.
+
+    One INSERT executed with the list of rows: SQLAlchemy hands it to the driver's executemany,
+    which psycopg sends in pipeline mode. Each row is still its own upsert, in order, without a
+    round trip each, so a repository listed twice is upserted twice and the later one wins.
+    """
+    if repositories:
+        session.execute(
+            _REPOSITORY_UPSERT,
+            [
+                {
+                    "id": repository.id,
+                    "installation_id": installation_id,
+                    "name": repository.name,
+                    "private": repository.private,
+                }
+                for installation_id, repository in repositories
+            ],
+        )
 
 
 def store_installation(session: Session, installation: schemas.Installation) -> None:
     """Store an installation and its account; a repeat leaves a stored one as it is.
 
-    The webhook's ``installation.created`` and a sign-in's list of installations both use it. A
-    sign-in locks a stale installation's repositories before any account, so the uninstall here
-    keeps the lock order (``retention.lock_repositories``).
+    The webhook's ``installation.created``, a sign-in and the reconciliation's
+    ``_store_new_account`` take the account's installation lock first
+    (``retention.lock_installations_of``), so the other installation read here cannot change before
+    this one is stored. The reconciliation's main transaction stores only to stored accounts it
+    holds FOR UPDATE, which makes those paths wait. A sign-in locks a stale installation's
+    repositories before any account, so the uninstall here keeps the lock order
+    (``retention.lock_repositories``).
     """
     account = installation.account
     # An account holds one installation. Another one stored for it means its "deleted" delivery
@@ -220,7 +254,9 @@ def new_account(account: schemas.Account) -> dict[str, Any]:
 
 
 def _installation_created(session: Session, data: dict[str, Any]) -> None:
-    store_installation(session, schemas.InstallationCreated.model_validate(data).installation)
+    installation = schemas.InstallationCreated.model_validate(data).installation
+    retention.lock_installations_of(session, [installation.account.id])
+    store_installation(session, installation)
 
 
 def _installation_deleted(session: Session, data: dict[str, Any]) -> None:

@@ -14,12 +14,14 @@ from types import MappingProxyType
 from typing import Any, Final, Literal, cast
 
 from sqlalchemy import (
+    BigInteger,
     ColumnElement,
     CursorResult,
     Delete,
     Select,
     delete,
     func,
+    literal,
     or_,
     select,
     update,
@@ -82,8 +84,10 @@ class Purged:
 
 def run_purges(session: Session, now: datetime) -> Purged:
     """Run every time-based purge in the caller's transaction, and log one line of counts."""
-    jobs = purge_jobs(session, now)
+    # Deliveries before the jobs' repositories, as a worker holds the delivery it processes before
+    # it locks repositories (``lock_repositories``): the purge waits for that delivery first.
     deliveries = purge_deliveries(session, now)
+    jobs = purge_jobs(session, now)
     # The owners' user rows before their sessions and addresses, in ID order, in the lock order
     # (``lock_repositories``): a sign-in or Delete my data that holds one is waited for. FOR NO
     # KEY UPDATE, as ``_user_rows`` takes it.
@@ -169,6 +173,7 @@ def lock_repositories(
     The lock order. Every path takes the rows it locks in this order, and only the steps it needs,
     so no two paths wait on each other in opposite orders (a deadlock):
 
+    0. each account's installation lock, in account ID order, through ``lock_installations_of``;
     1. repositories, in ID order, through this function;
     2. accounts, in ID order, with their installations;
     3. the user row;
@@ -182,11 +187,23 @@ def lock_repositories(
     reconciliation, a backfill run, the backfill queue and a re-queue, and the daily purge follow
     it. The queue and a re-queue also insert their queued rows in ID order, so the two at once
     never each wait for the other's new row: Postgres inserts an INSERT ... SELECT's rows in its
-    ORDER BY order in practice, though it does not document it. One known exception is left: a
-    sign-in reads its accounts' stale installations before it locks anything, so one that another
-    path (a webhook or the reconciliation) stores for one of those accounts after that read is
-    uninstalled by ``store_installation`` after the sign-in holds its repositories and lower
-    accounts.
+    ORDER BY order in practice, though it does not document it.
+
+    Level 0 is taken only by the paths that may insert a new installation, before any lock of
+    this order: a sign-in, for every account it lists, before it reads their stale installations;
+    the webhook's ``installation.created``; and the reconciliation's ``_store_new_account``. A path
+    that only deletes never takes it. So the stale installations a sign-in reads and locks cannot
+    change before it stores its own, and two stores for one account run one after the other. The
+    reconciliation's main transaction does not need it: it stores only to stored accounts it holds
+    FOR UPDATE and does not uninstall, which makes another store for them wait, and such an
+    account keeps its one installation (every account is stored with its installation and
+    deleted with it). A new account, or one it uninstalls and finds listed again, goes to
+    ``_store_new_account``. The one-bigint advisory key space is reserved for this lock, keyed
+    by the account ID; any other advisory lock uses the two-integer form with its own class ID.
+
+    A path that holds a webhook delivery row takes it before every lock of this order: the
+    worker's claim of the delivery it processes, and the daily purge's deletion of old
+    deliveries, which runs before its other purges.
     """
     read, key_share = _FOR_UPDATE[lock]
     session.execute(
@@ -195,6 +212,18 @@ def lock_repositories(
         .order_by(Repository.id)
         .with_for_update(read=read, key_share=key_share)
     ).all()
+
+
+def lock_installations_of(session: Session, account_ids: Collection[int]) -> None:
+    """Take these accounts' installation locks in ID order, until the transaction ends.
+
+    Level 0 of the lock order (``lock_repositories``): a transaction-level advisory lock with the
+    account ID as its one bigint key. Postgres does not enforce it; every path that may insert a
+    new installation takes it before any lock of the lock order
+    (https://www.postgresql.org/docs/18/explicit-locking.html#ADVISORY-LOCKS).
+    """
+    for account_id in sorted(set(account_ids)):
+        session.execute(select(func.pg_advisory_xact_lock(literal(account_id, BigInteger))))
 
 
 def delete_my_data(session: Session, user_id: int) -> Deleted:

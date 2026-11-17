@@ -10,6 +10,7 @@ TABLES = {
     "account",
     "backfill",
     "email_consent",
+    "email_outbox",
     "email_preference",
     "github_user",
     "installation",

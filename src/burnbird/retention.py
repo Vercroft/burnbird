@@ -32,6 +32,7 @@ from burnbird.models import (
     Account,
     Backfill,
     EmailConsent,
+    EmailOutbox,
     EmailPreference,
     GithubUser,
     Installation,
@@ -51,6 +52,8 @@ JOB_RETENTION: Final = timedelta(days=90)
 DELIVERY_RETENTION: Final = timedelta(days=7)
 # An email address not read again at a sign-in within this long is deleted.
 EMAIL_FRESHNESS: Final = timedelta(days=30)
+# A finished outbox row (sent, unknown, failed or skipped) is kept this long, past any cycle.
+OUTBOX_RETENTION: Final = timedelta(days=62)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +69,7 @@ class Deleted:
     installations: int = 0
     accounts: int = 0
     sessions: int = 0
+    outbox_emails: int = 0
     user_emails: int = 0
     email_preferences: int = 0
     email_consents: int = 0
@@ -80,6 +84,7 @@ class Purged:
     deliveries: int
     sessions: int
     emails: int
+    outbox_emails: int
 
 
 def run_purges(session: Session, now: datetime) -> Purged:
@@ -107,13 +112,15 @@ def run_purges(session: Session, now: datetime) -> Purged:
         deliveries=deliveries,
         sessions=purge_sessions(session, now),
         emails=purge_stale_emails(session, now),
+        outbox_emails=purge_outbox(session, now),
     )
     logger.info(
-        "purge: %d jobs, %d deliveries, %d sessions, %d email addresses",
+        "purge: %d jobs, %d deliveries, %d sessions, %d email addresses, %d outbox emails",
         purged.jobs,
         purged.deliveries,
         purged.sessions,
         purged.emails,
+        purged.outbox_emails,
     )
     return purged
 
@@ -147,6 +154,15 @@ def purge_stale_emails(session: Session, now: datetime) -> int:
     return _count(session, delete(UserEmail).where(_stale(now)))
 
 
+def purge_outbox(session: Session, now: datetime) -> int:
+    """Delete the outbox rows finished more than 62 days before ``now``; return how many.
+
+    A queued row is never finished, so it stays until it is sent, skipped or deleted with its user.
+    """
+    cutoff = _aware(now) - OUTBOX_RETENTION
+    return _delete_outbox(session, EmailOutbox.finished_at < cutoff)
+
+
 def _expired(now: datetime) -> ColumnElement[bool]:
     return UserSession.expires_at <= _aware(now)
 
@@ -178,7 +194,9 @@ def lock_repositories(
     2. accounts, in ID order, with their installations;
     3. the user row;
     4. the user's own rows (sessions, access lists, email address and choices), whose order
-       among themselves the user row lock makes safe.
+       among themselves the user row lock makes safe. Outbox rows are deleted across users too
+       (an uninstall, the purge), so every path that deletes several locks them in ID order
+       first.
 
     Rows a path inserts follow the same order, in ID order. Without the ORDER BY here the order
     would be whatever the query plan yields; a bulk DELETE or UPDATE has no order of its own, so
@@ -204,6 +222,11 @@ def lock_repositories(
     A path that holds a webhook delivery row takes it before every lock of this order: the
     worker's claim of the delivery it processes, and the daily purge's deletion of old
     deliveries, which runs before its other purges.
+
+    A path that sends an email holds its ``email-send`` task row and then the one outbox row, a
+    level 4 row, during the provider call, and nothing else of this order. Delete my data, a
+    revoke and an uninstall delete outbox rows before the user's address and the account, so
+    they wait for a send in progress, and nothing is sent after they commit.
     """
     read, key_share = _FOR_UPDATE[lock]
     session.execute(
@@ -305,6 +328,7 @@ def uninstall(session: Session, installation_id: int) -> Deleted:
         user_repositories=_user_repositories(session, repositories),
         repositories=_count(session, delete(Repository).where(Repository.id.in_(repositories))),
         label_sizes=_count(session, delete(LabelSize).where(LabelSize.account_id == account_id)),
+        outbox_emails=_delete_outbox(session, EmailOutbox.account_id == account_id),
         installations=_count(
             session, delete(Installation).where(Installation.account_id == account_id)
         ),
@@ -350,6 +374,8 @@ def _user_rows(session: Session, user_id: int) -> dict[str, int]:
         "user_repositories": _count(
             session, delete(UserRepository).where(UserRepository.user_id == user_id)
         ),
+        # Before the address: a send in progress holds its outbox row (``lock_repositories``).
+        "outbox_emails": _delete_outbox(session, EmailOutbox.user_id == user_id),
         "user_emails": _count(session, delete(UserEmail).where(UserEmail.user_id == user_id)),
         "email_preferences": _count(
             session, delete(EmailPreference).where(EmailPreference.user_id == user_id)
@@ -359,6 +385,16 @@ def _user_rows(session: Session, user_id: int) -> dict[str, int]:
         ),
         "users": _count(session, delete(GithubUser).where(GithubUser.id == user_id)),
     }
+
+
+def _delete_outbox(session: Session, rows: ColumnElement[bool]) -> int:
+    # Delete my data, a revoke, an uninstall and the purge find outbox rows by different indexes
+    # (user, account, finish time), so they would lock shared rows in different orders: each
+    # locks its rows in ID order first, as the lock order asks of a bulk DELETE.
+    session.execute(
+        select(EmailOutbox.id).where(rows).order_by(EmailOutbox.id).with_for_update()
+    ).all()
+    return _count(session, delete(EmailOutbox).where(rows))
 
 
 def _user_repositories(session: Session, repositories: Select[int]) -> int:

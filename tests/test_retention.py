@@ -15,6 +15,7 @@ from burnbird.models import (
     Account,
     Base,
     EmailConsent,
+    EmailOutbox,
     EmailPreference,
     GithubUser,
     Installation,
@@ -33,6 +34,7 @@ from burnbird.retention import (
     delete_my_data,
     purge_deliveries,
     purge_jobs,
+    purge_outbox,
     purge_sessions,
     purge_stale_emails,
     remove_repositories,
@@ -130,6 +132,28 @@ def _email_rows(session: Session, user: int) -> tuple[int, int]:
     return (
         len(session.scalars(select(EmailPreference).where(EmailPreference.user_id == user)).all()),
         len(session.scalars(select(EmailConsent).where(EmailConsent.user_id == user)).all()),
+    )
+
+
+def _outbox(
+    n: int,
+    user: int,
+    account: int | None = None,
+    finished_at: datetime | None = None,
+) -> EmailOutbox:
+    """An email for the user, about the account if given; finished (sent) when ``finished_at``."""
+    return EmailOutbox(
+        id=uuid.UUID(int=n),
+        user_id=user,
+        account_id=account,
+        kind="usage_warnings",
+        template="run_out_warning",
+        dedupe_key=f"example:{n}",
+        params={"example": n},
+        created_at=RECENT,
+        expires_at=NOW + timedelta(days=1),
+        state="queued" if finished_at is None else "sent",
+        finished_at=finished_at,
     )
 
 
@@ -245,6 +269,20 @@ def test_an_address_is_kept_exactly_30_days_after_a_sign_in_read_it(world: Sessi
     assert _deleted(before, _rows(world)) == {"user_email": {(MEMBER,)}}
 
 
+def test_an_outbox_email_is_kept_exactly_62_days_after_it_finished(world: Session) -> None:
+    world.add_all(
+        [
+            _outbox(1, PERSON, finished_at=NOW - timedelta(days=62)),
+            _outbox(2, PERSON, finished_at=NOW - timedelta(days=62) - TICK),
+            # Still queued, so not finished: never purged, however old.
+            _outbox(3, MEMBER),
+        ]
+    )
+    before = _rows(world)
+    assert purge_outbox(world, NOW) == 1
+    assert _deleted(before, _rows(world)) == {"email_outbox": {(uuid.UUID(int=2),)}}
+
+
 def test_run_purges_runs_every_purge_and_logs_one_line_of_counts(
     world: Session, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -259,23 +297,30 @@ def test_run_purges_runs_every_purge_and_logs_one_line_of_counts(
             _session(MEMBER, NOW + TICK, 11),
             _email(PERSON, NOW - timedelta(days=30)),
             _email(MEMBER, NOW - timedelta(days=30) - TICK),
+            _outbox(20, PERSON, finished_at=NOW - timedelta(days=62)),
+            _outbox(21, PERSON, finished_at=NOW - timedelta(days=62) - TICK),
         ]
     )
     before = _rows(world)
     with caplog.at_level(logging.INFO, logger=retention.__name__):
-        assert run_purges(world, NOW) == Purged(jobs=1, deliveries=1, sessions=1, emails=1)
+        assert run_purges(world, NOW) == Purged(
+            jobs=1, deliveries=1, sessions=1, emails=1, outbox_emails=1
+        )
     assert _deleted(before, _rows(world)) == {
         "job": {(11, 1)},
         "webhook_delivery": {(uuid.UUID(int=11),)},
         "session": {(bytes([10]) * 32,)},
         "user_email": {(MEMBER,)},
+        "email_outbox": {(uuid.UUID(int=21),)},
     }
     [record] = [r for r in caplog.records if r.name == retention.__name__]
-    assert record.getMessage() == "purge: 1 jobs, 1 deliveries, 1 sessions, 1 email addresses"
+    assert record.getMessage() == (
+        "purge: 1 jobs, 1 deliveries, 1 sessions, 1 email addresses, 1 outbox emails"
+    )
 
 
 @pytest.mark.parametrize(
-    "purge", [purge_jobs, purge_deliveries, purge_sessions, purge_stale_emails]
+    "purge", [purge_jobs, purge_deliveries, purge_sessions, purge_stale_emails, purge_outbox]
 )
 def test_a_time_without_a_timezone_is_refused(
     world: Session, purge: Callable[[Session, datetime], int]
@@ -321,6 +366,28 @@ def test_the_user_s_email_choices_and_consent_rows_go_with_them(
     assert (deleted.email_preferences, deleted.email_consents) == (3, 3)
     assert _email_rows(world, PERSON) == (0, 0)
     assert _email_rows(world, MEMBER) == (3, 3)
+
+
+@pytest.mark.parametrize(
+    "remove", [delete_my_data, revoke_authorization], ids=["delete my data", "revoke"]
+)
+def test_the_user_s_outbox_emails_go_with_them(
+    world: Session, remove: Callable[[Session, int], Deleted]
+) -> None:
+    world.add_all(
+        [
+            _outbox(1, PERSON, ORG),
+            _outbox(2, PERSON, finished_at=RECENT),
+            _outbox(3, MEMBER, ORG),
+        ]
+    )
+    before = _rows(world)
+    # Counted, so the explicit delete is what removed them, not the foreign key's cascade.
+    assert remove(world, PERSON).outbox_emails == 2
+    assert _deleted(before, _rows(world))["email_outbox"] == {
+        (uuid.UUID(int=1),),
+        (uuid.UUID(int=2),),
+    }
 
 
 def test_delete_my_data_marks_when_the_personal_account_s_data_was_deleted(
@@ -410,6 +477,23 @@ def test_uninstall_removes_the_account_and_everything_under_it(world: Session) -
     }
 
 
+def test_uninstall_removes_the_account_s_outbox_emails(world: Session) -> None:
+    world.add_all(
+        [
+            _outbox(1, PERSON, ORG),
+            _outbox(2, MEMBER, ORG, finished_at=RECENT),
+            _outbox(3, MEMBER, OTHER_ORG),
+            _outbox(4, MEMBER),
+        ]
+    )
+    before = _rows(world)
+    assert uninstall(world, INSTALLATION[ORG]).outbox_emails == 2
+    assert _deleted(before, _rows(world))["email_outbox"] == {
+        (uuid.UUID(int=1),),
+        (uuid.UUID(int=2),),
+    }
+
+
 def test_uninstalling_an_unknown_installation_deletes_nothing(world: Session) -> None:
     before = _rows(world)
     assert uninstall(world, 9999) == Deleted()
@@ -493,3 +577,42 @@ def test_every_path_that_locks_several_repositories_locks_them_in_id_order(
     lock_several(session)
     [lock] = _locks(sent)
     assert lock.rstrip().endswith(f"ORDER BY repository.id {mode}")
+
+
+def _outbox_statements(statements: list[str]) -> list[str]:
+    return [
+        "lock" if s.startswith("SELECT email_outbox.id") else "delete"
+        for s in statements
+        if s.startswith(("SELECT email_outbox.id", "DELETE FROM email_outbox"))
+    ]
+
+
+@pytest.mark.parametrize(
+    "delete_several",
+    [
+        pytest.param(lambda s: delete_my_data(s, PERSON), id="delete_my_data"),
+        pytest.param(lambda s: revoke_authorization(s, PERSON), id="revoke"),
+        pytest.param(lambda s: uninstall(s, INSTALLATION[ORG]), id="uninstall"),
+        pytest.param(lambda s: purge_outbox(s, NOW), id="purge_outbox"),
+    ],
+)
+def test_every_bulk_outbox_delete_locks_its_rows_in_id_order_first(
+    world: Session, sent: list[str], delete_several: Callable[[Session], object]
+) -> None:
+    # The paths find the rows by different indexes (user, account, finish time), so each locks
+    # them in one order first, as the lock order asks of a bulk DELETE.
+    sent.clear()
+    delete_several(world)
+    assert _outbox_statements(sent) == ["lock", "delete"]
+    [lock] = [s for s in sent if s.startswith("SELECT email_outbox.id")]
+    assert lock.rstrip().endswith("ORDER BY email_outbox.id FOR UPDATE")
+
+
+def test_delete_my_data_deletes_outbox_rows_before_the_address(
+    world: Session, sent: list[str]
+) -> None:
+    # A send in progress holds its outbox row, so Delete my data waits there, before the address.
+    sent.clear()
+    delete_my_data(world, PERSON)
+    deletes = [s.split(" WHERE")[0] for s in sent if s.startswith("DELETE FROM")]
+    assert deletes.index("DELETE FROM email_outbox") < deletes.index("DELETE FROM user_email")

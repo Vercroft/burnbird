@@ -28,7 +28,7 @@ def test_a_run_purges_at_its_own_time_and_records_its_success(
 
     def purges(_: Session, now: datetime) -> Purged:
         ran.append(now)
-        return Purged(jobs=0, deliveries=0, sessions=0, emails=0)
+        return Purged(jobs=0, deliveries=0, sessions=0, emails=0, outbox_emails=0)
 
     monkeypatch.setattr(retention, "run_purges", purges)
     assert purge.run(sessions, NOW)

@@ -115,8 +115,15 @@ def run_purges(session: Session, now: datetime) -> Purged:
 
 
 def purge_jobs(session: Session, now: datetime) -> int:
-    """Delete the jobs created more than 90 days before ``now``; return how many."""
+    """Delete the jobs created more than 90 days before ``now``; return how many.
+
+    Their repositories are locked first, FOR KEY SHARE, in the lock order (``lock_repositories``):
+    every other path that locks a job holds its repository FOR UPDATE first, so it is waited for.
+    """
     cutoff = _aware(now) - JOB_RETENTION
+    lock_repositories(
+        session, select(Job.repository_id).where(Job.created_at < cutoff), lock="KEY SHARE"
+    )
     return _count(session, delete(Job).where(Job.created_at < cutoff))
 
 
@@ -173,12 +180,9 @@ def lock_repositories(
     a path locks its rows with a separate statement first. Delete my data, a sign-in (a stale
     installation's uninstall included), ``store_job``, an uninstall, a removal, the
     reconciliation, a backfill run, the backfill queue's and a re-queue's locks, and the daily
-    purge's sessions and email addresses follow it. Two known exceptions are left, each a single
-    statement that no test can pause between its rows yet, tracked as one issue: the daily purge
-    deletes old jobs without their repositories' locks, so its DELETE and another path's DELETE
-    of the same jobs (Delete my data, an uninstall or a removal) can lock them in different
-    orders; and the backfill queue and a re-queue insert queued rows in the order they read them,
-    so the two at once can each wait for the other's new row.
+    purge follow it. One known exception is left, a single statement that no test can pause
+    between its rows yet: the backfill queue and a re-queue insert queued rows in the order they
+    read them, so the two at once can each wait for the other's new row.
     """
     read, key_share = _FOR_UPDATE[lock]
     session.execute(

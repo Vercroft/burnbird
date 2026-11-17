@@ -712,3 +712,60 @@ def test_a_sign_in_uninstalling_a_stale_installation_a_requeue_and_delete_my_dat
 
     with Session(engine) as check:
         assert check.get(Installation, stale.id) is None
+
+
+def _job(
+    installation_id: int, repository_id: int, job_id: int, created_at: datetime
+) -> schemas.WorkflowJobCompleted:
+    return schemas.WorkflowJobCompleted(
+        installation=schemas.InstallationRef(id=installation_id),
+        repository=schemas.Repository(id=repository_id, name="app", private=True),
+        workflow_job=schemas.WorkflowJob(
+            id=job_id,
+            run_id=job_id * 10,
+            run_attempt=1,
+            workflow_name="ci",
+            labels=("ubuntu-latest",),
+            runner_id=7,
+            runner_name="GitHub Actions 7",
+            runner_group_name="GitHub Actions",
+            created_at=created_at,
+            started_at=created_at,
+            completed_at=created_at,
+            conclusion="success",
+        ),
+    )
+
+
+def test_the_daily_purge_and_a_backfill_storing_old_jobs(
+    engine: Engine, cleanup: list[int]
+) -> None:
+    # Two jobs past the purge's cutoff, the older stored first, so the purge's DELETE locks it
+    # first in either scan order. One transaction stores them again, the newer first, as a run's
+    # jobs; paused before the older. No path stores jobs this old: the two upserts stand in for
+    # two DELETEs that scan the same jobs in opposite orders, which no test can pause between rows.
+    user_id, repository_id = 8000, 8001
+    cleanup.append(user_id)
+    installation = _installation(5000, user_id, "User")
+    _stored(engine, installation, repository_id)
+    cutoff = NOW - retention.JOB_RETENTION
+    older = _job(installation.id, repository_id, 8002, cutoff - timedelta(days=2))
+    newer = _job(installation.id, repository_id, 8003, cutoff - timedelta(days=1))
+    with sessionmaker(bind=engine).begin() as session:
+        store_job(session, older)
+        store_job(session, newer)
+
+    def stores(session: Session) -> None:
+        store_job(session, newer)
+        store_job(session, older)
+
+    _race(
+        engine,
+        _transaction(stores),
+        _inserts("job", older.workflow_job.id),
+        _transaction(lambda session: retention.run_purges(session, NOW)),
+    )
+
+    with Session(engine) as check:
+        # The purge waited for the stores, then deleted both.
+        assert not check.scalars(select(Job).where(Job.repository_id == repository_id)).all()

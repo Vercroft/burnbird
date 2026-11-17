@@ -84,8 +84,10 @@ class Purged:
 
 def run_purges(session: Session, now: datetime) -> Purged:
     """Run every time-based purge in the caller's transaction, and log one line of counts."""
-    jobs = purge_jobs(session, now)
+    # Deliveries before the jobs' repositories, as a worker holds the delivery it processes before
+    # it locks repositories (``lock_repositories``): the purge waits for that delivery first.
     deliveries = purge_deliveries(session, now)
+    jobs = purge_jobs(session, now)
     # The owners' user rows before their sessions and addresses, in ID order, in the lock order
     # (``lock_repositories``): a sign-in or Delete my data that holds one is waited for. FOR NO
     # KEY UPDATE, as ``_user_rows`` takes it.
@@ -198,6 +200,10 @@ def lock_repositories(
     deleted with it). A new account, or one it uninstalls and finds listed again, goes to
     ``_store_new_account``. The one-bigint advisory key space is reserved for this lock, keyed
     by the account ID; any other advisory lock uses the two-integer form with its own class ID.
+
+    A path that holds a webhook delivery row takes it before every lock of this order: the
+    worker's claim of the delivery it processes, and the daily purge's deletion of old
+    deliveries, which runs before its other purges.
     """
     read, key_share = _FOR_UPDATE[lock]
     session.execute(

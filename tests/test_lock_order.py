@@ -9,6 +9,7 @@ test fails with its error.
 
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -26,7 +27,7 @@ from burnbird.auth.service import ListedRepository, SignIn, session_digest, stor
 from burnbird.email.preferences import set_choice
 from burnbird.github import backfill, reconcile, schemas
 from burnbird.github.client import GithubApp
-from burnbird.github.events import HANDLERS, store_job
+from burnbird.github.events import HANDLERS, process_next, store_job
 from burnbird.models import (
     Account,
     Backfill,
@@ -39,6 +40,7 @@ from burnbird.models import (
     UserInstallation,
     UserRepository,
     UserSession,
+    WebhookDelivery,
 )
 from tests.github import fakes
 from tests.github.fakes import FakeGithub, installation_item, repository_item
@@ -1088,3 +1090,49 @@ def test_a_sign_in_storing_new_repositories_listed_out_of_id_order(
 
     with Session(engine) as check:
         assert check.get(Repository, second) is not None
+
+
+def test_the_daily_purge_and_a_worker_processing_an_old_delivery(
+    engine: Engine, cleanup: list[int]
+) -> None:
+    # A job's delivery received more than 7 days ago is still being processed: the worker holds
+    # it and is paused before store_job locks the repository. The purge deletes the repository's
+    # jobs past their limit and the deliveries past theirs. Should the worker be the one Postgres
+    # aborts, its own savepoint hides the error, so the stored job is what the test checks.
+    user_id, repository_id = 8120, 8121
+    cleanup.append(user_id)
+    installation = _installation(5120, user_id, "User")
+    _stored(engine, installation, repository_id)
+    received = NOW - retention.DELIVERY_RETENTION - timedelta(days=1)
+    old = NOW - retention.JOB_RETENTION - timedelta(days=1)
+    with sessionmaker(bind=engine).begin() as session:
+        store_job(session, _job(installation.id, repository_id, 8122, old))
+    job = _job(installation.id, repository_id, 8123, received)
+    delivery_id = uuid.uuid4()
+    with engine.begin() as connection:
+        connection.execute(
+            insert(WebhookDelivery).values(
+                id=delivery_id,
+                received_at=received,
+                event="workflow_job",
+                action="completed",
+                payload=job.model_dump(mode="json"),
+            )
+        )
+
+    try:
+        _race(
+            engine,
+            lambda sessions: process_next(sessions, NOW),
+            lambda statement, _: (
+                statement.startswith("SELECT repository.id") and statement.endswith("FOR UPDATE")
+            ),
+            _transaction(lambda session: retention.run_purges(session, NOW)),
+        )
+
+        with Session(engine) as check:
+            # The purge waited for the worker, which stored the job.
+            assert check.get(Job, (job.workflow_job.id, 1)) is not None
+    finally:
+        with engine.begin() as connection:
+            connection.execute(delete(WebhookDelivery).where(WebhookDelivery.id == delivery_id))

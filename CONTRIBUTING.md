@@ -47,6 +47,20 @@ docker run --rm -d --name burnbird-test-postgres -e POSTGRES_HOST_AUTH_METHOD=tr
   -p 127.0.0.1:55432:5432 "$(grep -oE 'postgres:[^ ]+@sha256:[0-9a-f]{64}' .github/workflows/ci.yml)"
 ```
 
+The email tests need a local Mailpit, named in `BURNBIRD_TEST_SMTP_URL` and `BURNBIRD_TEST_MAILPIT_URL`; without it
+they fail, never skip. No test reaches a real mail server or the provider: provider answers come from an httpx
+MockTransport. Run Mailpit from the image the CI job pins, listening on loopback only, and stop it when you are done
+(on Docker Desktop, publish `127.0.0.1:1025:1025` and `127.0.0.1:8025:8025` instead of the host network):
+
+```sh
+docker run --rm -d --name burnbird-test-mailpit --network host \
+  -e MP_SMTP_BIND_ADDR=127.0.0.1:1025 -e MP_UI_BIND_ADDR=127.0.0.1:8025 -e MP_DISABLE_VERSION_CHECK=true \
+  -e MP_BLOCK_REMOTE_CSS_AND_FONTS=true -e MP_MAX_MESSAGE_SIZE=1 -e MP_MAX_MESSAGES=200 \
+  "$(grep -oE 'axllent/mailpit:[^ ]+@sha256:[0-9a-f]{64}' .github/workflows/ci.yml)"
+export BURNBIRD_TEST_SMTP_URL=smtp://127.0.0.1:1025 BURNBIRD_TEST_MAILPIT_URL=http://localhost:8025
+docker stop burnbird-test-mailpit
+```
+
 | To | Run | CI job |
 |---|---|---|
 | Install the project and its dev tools | `uv sync --locked` | Python |
@@ -54,7 +68,7 @@ docker run --rm -d --name burnbird-test-postgres -e POSTGRES_HOST_AUTH_METHOD=tr
 | Lint | `uv run --locked ruff check` | Python |
 | Check types | `uv run --locked mypy` | Python |
 | Check the Python version agrees everywhere | `uv run --locked pytest tests/test_python_version.py` | Python |
-| Run the tests, with the test Postgres (one test: `uv run --locked pytest tests/test_package.py`) | `uv run --locked pytest` | Python |
+| Run the tests, with the test Postgres and Mailpit (one test: `uv run --locked pytest tests/test_package.py`) | `uv run --locked pytest` | Python |
 | Check every locked package is at least 7 days old | `uv lock --check` | dependency-age |
 | Check every image your branch adds is at least 7 days old (needs Docker with buildx) | `python3 scripts/check-image-age.py --base origin/main` | dependency-age |
 | Scan for secrets | `pre-commit run --all-files` | gitleaks |
@@ -87,10 +101,10 @@ messages, the pull request title or its description. Its output names only the c
 | `src/burnbird/github/` | GitHub: `router.py` takes `POST /github/webhook` (signature, then the fields of a handled event, stored once); `schemas.py` names the fields kept per event; `signature.py` checks the HMAC; `events.py` is the worker's step that turns stored deliveries into jobs, installations and deletions (an uninstall, removed repositories, a revoked authorization); `client.py` is the App's own API client (the App JWT, installation tokens, paging, retries, rate limits); `reconcile.py` is the hourly reconciliation of the stored installations and repositories with GitHub's lists, which also queues every repository never backfilled; `backfill.py` stores a queued repository's jobs since its cycle start; `redeliver.py` is the hourly redelivery of failed webhook deliveries, which re-queues the backfill for what stays lost; `schedule.py` claims a due run of a periodic task and records how it ended; `config.py` reads the App's client ID and secret files |
 | `src/burnbird/auth/` | Sign-in with GitHub: `router.py` takes `/auth/login`, `/auth/callback` and `/auth/logout`; `service.py` holds Authlib's GitHub client (state and the PKCE S256 verifier), the user's lists and primary verified email address from GitHub and the one-transaction store; `device.py` labels a session's device from the request headers; `dependencies.py` gives the signed-in user, the access filters, `account_access` (account-wide access), the CSRF check and a POST's form fields; `config.py` reads the settings |
 | `src/burnbird/account/` | The signed-in user's own data: `router.py` takes `GET /you` (the "Your data" page), `POST /you/email` (the run-out warnings switch), `POST /you/delete` (Delete my data) and `GET /you/deleted`; `service.py` reads what the page shows; `templates/` holds its pages |
-| `src/burnbird/email/` | Email choices: `preferences.py` writes each user's defaults once and records every change; `consent.txt` is the consent wording shown next to the switch, and `consent.py` gives it and its version (the start of its SHA-256) |
-| `src/burnbird/templates.py`, `src/burnbird/templates/` | The one Jinja2 environment (autoescape on for `.html`, templates shipped in the package) and the shared base layout |
+| `src/burnbird/email/` | Email: `preferences.py` writes each user's email choices once and records every change; `consent.txt` is the consent wording shown next to the switch, and `consent.py` gives it and its version (the start of its SHA-256); `config.py` reads the email settings (the provider with its bare send token, or a loopback Mailpit only); `message.py` renders an email from `templates/` (`layout.html` and `layout.txt` give every email its footer and, for usage email, its one-click unsubscribe) and builds the provider's JSON or a MIME message; `sender.py` makes one send and maps each answer to one outcome (sent, retry, reset, config, failed, or unknown, which is never resent). Nothing calls the sender yet |
+| `src/burnbird/templates.py`, `src/burnbird/templates/` | The one Jinja2 environment for pages and email (autoescape on for `.html`, templates shipped in the package) and the shared base layout |
 | `src/burnbird/security_headers.py` | The security headers every answer carries |
-| `src/burnbird/logs.py` | The commands' logging: one formatter that redacts token-shaped values, `Authorization` values, OAuth secrets and the callback's code and state |
+| `src/burnbird/logs.py` | The commands' logging: one formatter that redacts token-shaped values, `Authorization` values, OAuth secrets and the callback's code and state, and masks an email address to its first character and domain |
 | `src/burnbird/web.py` | Creates the web app: the security headers, the body limit and each feature's router, nothing else |
 | `src/burnbird/worker.py` | One pass of the worker: the stored deliveries, then the periodic tasks that are due (reconciliation, redelivery), then at most one repository's backfill, then the daily purge, each step isolated |
 | `src/burnbird/purge.py` | The daily purge task: claims the run and calls `retention.run_purges` |
@@ -105,7 +119,7 @@ messages, the pull request title or its description. Its output names only the c
 | `SECURITY.md` | How to report a vulnerability |
 | `.gitleaks.toml`, `.pre-commit-config.yaml` | The leak patterns and the commit-time hook; the `url-host` rule's last list holds the reviewed hosts only this repository cites |
 | `.github/CODEOWNERS` | Who reviews every change |
-| `.github/workflows/` | CI (Python with its Postgres service, gitleaks, zizmor, suppressions, commit policy), dependency-age (packages and images) and its daily re-run for Dependabot pull requests, links, CodeQL and Scorecard |
+| `.github/workflows/` | CI (Python with its Postgres and Mailpit services, gitleaks, zizmor, suppressions, commit policy), dependency-age (packages and images) and its daily re-run for Dependabot pull requests, links, CodeQL and Scorecard |
 | `.github/scripts/` | The commit policy check and its tests |
 | `.github/requirements/` | Hash-pinned CI tools (zizmor) |
 | `.github/dependabot.yml` | Monthly grouped updates for the Python packages, the actions, the workflow images and the CI tools; `tests/test_images.py` checks the images are pinned and Postgres majors are held |

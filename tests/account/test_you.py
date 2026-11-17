@@ -329,6 +329,45 @@ def test_an_address_that_is_not_paused_says_nothing_of_a_pause(
     assert "Email paused" not in client.get("/you").text
 
 
+def _pause_for(session: Session, reason: str) -> None:
+    email = session.get_one(UserEmail, USER)
+    email.suppressed_at, email.suppressed_reason = NOW + timedelta(days=2), reason
+    session.flush()
+
+
+def test_a_reported_address_says_email_is_off(
+    client: TestClient, signed_in: str, session: Session
+) -> None:
+    _pause_for(session, "complaint")
+    page = _text(client.get("/you").text)
+    assert f"Email off: it was reported as spam on {_day(NOW + timedelta(days=2))}." in page
+    assert "Email paused" not in page
+
+
+def test_turning_warnings_on_after_a_complaint_lifts_its_pause(
+    client: TestClient, signed_in: str, session: Session
+) -> None:
+    _save(client, signed_in, on=False)
+    _pause_for(session, "complaint")
+    _save(client, signed_in, on=True)
+    session.expire_all()
+    email = session.get_one(UserEmail, USER)
+    assert (email.suppressed_at, email.suppressed_reason) == (None, None)
+    assert _consents(session)[-1][:3] == ("usage_warnings", True, "settings")
+    assert "Email off" not in client.get("/you").text
+
+
+def test_turning_warnings_on_never_lifts_a_bounce(
+    client: TestClient, signed_in: str, session: Session
+) -> None:
+    # Only a new, working address ends a bounce's pause.
+    _save(client, signed_in, on=False)
+    _pause_for(session, "hard_bounce")
+    _save(client, signed_in, on=True)
+    session.expire_all()
+    assert session.get_one(UserEmail, USER).suppressed_reason == "hard_bounce"
+
+
 def _day(when: datetime) -> str:
     return when.astimezone(UTC).strftime("%d %b %Y")
 

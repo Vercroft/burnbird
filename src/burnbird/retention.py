@@ -230,7 +230,8 @@ def lock_repositories(
 
     The email provider's webhook takes the user rows it reports on (level 3, ID order, FOR NO KEY
     UPDATE), then each user's address and choices (level 4), and nothing else of this order; the
-    outbox row it is about is read without a lock.
+    outbox row it is about is read without a lock. The "Your data" switch's save does the same
+    for its user: it may lift a complaint's pause on the address before it saves the choice.
     """
     read, key_share = _FOR_UPDATE[lock]
     session.execute(

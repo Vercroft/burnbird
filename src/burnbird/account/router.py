@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 
 from burnbird import retention
-from burnbird.account.service import your_data
+from burnbird.account.service import save_warnings, your_data
 from burnbird.auth.dependencies import (
     auth_state,
     csrf_protected,
@@ -23,7 +23,6 @@ from burnbird.auth.dependencies import (
 )
 from burnbird.auth.service import SESSION_COOKIE
 from burnbird.email import consent
-from burnbird.email.preferences import set_choice
 from burnbird.templates import page
 
 router = APIRouter(prefix="/you")
@@ -69,6 +68,8 @@ def save_email_choice(
 ) -> Response:
     """Save the run-out warnings switch; a change is recorded once, a repeat not at all.
 
+    Turning warnings on after a spam complaint also lifts its pause (``save_warnings``).
+
     A ticked box sends the field once, as "on"; an unticked one sends nothing. Anything else (a
     repeated field, another value) is not this form, so it changes nothing.
     """
@@ -77,7 +78,7 @@ def save_email_choice(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "the warnings switch is not valid")
     state = auth_state(request)
     with state.sessions.begin() as session:
-        set_choice(session, user, "usage_warnings", sent == ["on"], state.now())
+        save_warnings(session, user, sent == ["on"], state.now())
     return RedirectResponse("/you", status.HTTP_303_SEE_OTHER)
 
 

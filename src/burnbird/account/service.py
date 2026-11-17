@@ -1,15 +1,17 @@
-"""What the "Your data" page shows, read in one transaction; no function here commits."""
+"""What the "Your data" page shows and saves, in the caller's transaction; nothing here commits."""
 
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from burnbird.email.preferences import set_choice
 from burnbird.models import (
     Account,
     EmailConsent,
     EmailPreference,
+    GithubUser,
     Installation,
     UserEmail,
     UserInstallation,
@@ -85,3 +87,23 @@ def your_data(session: Session, user_id: int, now: datetime) -> YourData:
         sessions=tuple(SignedInSession(device, started) for device, started in sessions),
         accounts=tuple(accounts),
     )
+
+
+def save_warnings(session: Session, user_id: int, enabled: bool, now: datetime) -> bool:
+    """Save the run-out warnings switch; return whether the choice changed.
+
+    Turning warnings on is the user's new consent after a spam complaint, so it lifts a pause the
+    complaint set; a bounce's pause stays until a sign-in brings a new address. The user row is
+    taken first (FOR NO KEY UPDATE), then the address, then the choice: the provider's webhook
+    takes them in that order too (``retention.lock_repositories``).
+    """
+    session.execute(
+        select(GithubUser.id).where(GithubUser.id == user_id).with_for_update(key_share=True)
+    ).all()
+    if enabled:
+        session.execute(
+            update(UserEmail)
+            .where(UserEmail.user_id == user_id, UserEmail.suppressed_reason == "complaint")
+            .values(suppressed_at=None, suppressed_reason=None)
+        )
+    return set_choice(session, user_id, "usage_warnings", enabled, now)

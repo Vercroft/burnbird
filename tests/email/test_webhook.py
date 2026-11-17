@@ -1,4 +1,4 @@
-"""``POST /email/webhook``: the provider's hard bounces pause an address; nothing else changes.
+"""``POST /email/webhook``: hard bounces and spam complaints pause an address, nothing else.
 
 Every body is invented in the provider's documented shape; references are made at run time, the
 key comes from ``secrets`` and addresses are on example.invalid.
@@ -15,13 +15,16 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from burnbird.account.service import save_warnings
 from burnbird.auth.config import AuthSettings
 from burnbird.email import config
+from burnbird.email.preferences import set_choice
 from burnbird.email.webhook import EmailWebhookState
 from burnbird.github.config import ConfigError
-from burnbird.models import EmailOutbox, EmailPreference, GithubUser, UserEmail
+from burnbird.models import EmailConsent, EmailOutbox, EmailPreference, GithubUser, UserEmail
 from burnbird.web import MAX_BODY_BYTES, create_app
 from tests.email.examples import webhook_event
 from tests.email.test_webhook_signature import sign
@@ -274,4 +277,138 @@ def test_addresses_are_compared_by_the_database_s_own_lower_case(
         _post(client, key, _json(webhook_event("hardbounce", reference, reported))).status_code
         == 200
     )
+    assert _pause(session) == (NOW, "hard_bounce")
+
+
+# ---------- a spam complaint ----------
+
+KINDS = ("usage_warnings", "weekly_summary", "news")
+
+
+def _all_on(session: Session) -> None:
+    for kind in KINDS:
+        session.get_one(EmailPreference, (USER, kind)).enabled = True
+    session.flush()
+
+
+def _choices(session: Session) -> dict[str, bool]:
+    session.expire_all()
+    return {
+        row.kind: row.enabled
+        for row in session.scalars(select(EmailPreference).where(EmailPreference.user_id == USER))
+    }
+
+
+def _consents(session: Session) -> list[tuple[str, bool, str]]:
+    session.expire_all()
+    return [
+        (row.kind, row.enabled, row.source)
+        for row in session.scalars(
+            select(EmailConsent).where(EmailConsent.user_id == USER).order_by(EmailConsent.id)
+        )
+    ]
+
+
+def test_a_complaint_pauses_the_address_and_turns_every_kind_off(
+    client: TestClient,
+    key: bytes,
+    reference: str,
+    session: Session,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _all_on(session)
+    caplog.set_level(logging.INFO)
+    answer = _post(client, key, _json(webhook_event("fbl_complaint", reference, ADDRESS)))
+    assert (answer.status_code, answer.content) == (200, b"")
+    assert _pause(session) == (NOW, "complaint")
+    assert _choices(session) == dict.fromkeys(KINDS, False)
+    assert _consents(session) == [(kind, False, "complaint") for kind in KINDS]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == [f"email webhook: fbl_complaint for outbox {reference}"]
+    assert ADDRESS not in caplog.text
+
+
+def test_a_complaint_records_every_kind_even_one_already_off(
+    client: TestClient, key: bytes, reference: str, session: Session
+) -> None:
+    # The fixture's weekly summary and news are off already; the report is still recorded for
+    # each, which also marks the complaint as acted on.
+    _post(client, key, _json(webhook_event("fbl_complaint", reference, ADDRESS)))
+    assert _choices(session) == dict.fromkeys(KINDS, False)
+    assert _consents(session) == [(kind, False, "complaint") for kind in KINDS]
+
+
+def test_a_replayed_complaint_after_warnings_were_turned_on_again_changes_nothing_either(
+    client: TestClient, clock: Clock, key: bytes, reference: str, session: Session
+) -> None:
+    # Every kind was off before the complaint, so no choice changed; the replay is still known.
+    session.get_one(EmailPreference, (USER, "usage_warnings")).enabled = False
+    session.flush()
+    body = _json(webhook_event("fbl_complaint", reference, ADDRESS))
+    _post(client, key, body)
+    email = session.get_one(UserEmail, USER)
+    email.suppressed_at = email.suppressed_reason = None
+    set_choice(session, USER, "usage_warnings", True, NOW + timedelta(days=1))
+    session.flush()
+    clock.at = NOW + timedelta(days=1, minutes=1)
+    _post(client, key, body, at=clock.at)
+    assert _pause(session) == (None, None)
+    assert _choices(session)["usage_warnings"] is True
+
+
+def test_a_repeated_complaint_records_nothing(
+    client: TestClient, clock: Clock, key: bytes, reference: str, session: Session
+) -> None:
+    _all_on(session)
+    body = _json(webhook_event("fbl_complaint", reference, ADDRESS))
+    _post(client, key, body)
+    clock.at = NOW + timedelta(minutes=1)
+    _post(client, key, body, at=clock.at)
+    assert _pause(session) == (NOW, "complaint")
+    assert len(_consents(session)) == 3
+
+
+def test_a_replayed_complaint_after_the_user_turned_warnings_on_changes_nothing(
+    client: TestClient, clock: Clock, key: bytes, reference: str, session: Session
+) -> None:
+    body = _json(webhook_event("fbl_complaint", reference, ADDRESS))
+    _post(client, key, body)
+    # The user turns warnings on again on "Your data", which also lifts the complaint's pause.
+    email = session.get_one(UserEmail, USER)
+    email.suppressed_at = email.suppressed_reason = None
+    set_choice(session, USER, "usage_warnings", True, NOW + timedelta(days=1))
+    session.flush()
+    clock.at = NOW + timedelta(days=1, minutes=1)
+    assert _post(client, key, body, at=clock.at).status_code == 200
+    assert _pause(session) == (None, None)
+    assert _choices(session)["usage_warnings"] is True
+
+
+def test_a_complaint_from_an_address_the_user_no_longer_has_still_turns_email_off(
+    client: TestClient, key: bytes, reference: str, session: Session
+) -> None:
+    # The person complained about our email: their choices go off, but the new address is not
+    # the one reported, so it is not paused.
+    _post(client, key, _json(webhook_event("fbl_complaint", reference, _address("older"))))
+    assert _pause(session) == (None, None)
+    assert _choices(session)["usage_warnings"] is False
+
+
+def test_a_hard_bounce_replaces_a_complaint_s_pause_and_the_switch_cannot_lift_it(
+    client: TestClient, clock: Clock, key: bytes, reference: str, session: Session
+) -> None:
+    _post(client, key, _json(webhook_event("fbl_complaint", reference, ADDRESS)))
+    clock.at = NOW + timedelta(minutes=1)
+    _post(client, key, _json(webhook_event("hardbounce", reference, ADDRESS)), at=clock.at)
+    assert _pause(session) == (clock.at, "hard_bounce")
+    save_warnings(session, USER, True, clock.at)
+    assert _pause(session) == (clock.at, "hard_bounce")
+
+
+def test_a_complaint_never_replaces_a_bounce_s_pause(
+    client: TestClient, clock: Clock, key: bytes, reference: str, session: Session
+) -> None:
+    _post(client, key, _json(webhook_event("hardbounce", reference, ADDRESS)))
+    clock.at = NOW + timedelta(minutes=1)
+    _post(client, key, _json(webhook_event("fbl_complaint", reference, ADDRESS)), at=clock.at)
     assert _pause(session) == (NOW, "hard_bounce")

@@ -4,11 +4,14 @@
 <h2>Email</h2>
 {% if data.address %}
 <p>Your address: {{ data.address }}, read from GitHub on {{ read_at }}.</p>
-{% if data.warnings %}
+{% if data.warnings and not data.paused_reason %}
 <p>Warnings continue until {{ warnings_until }}. Sign in to keep them.</p>
 {% endif %}
 {% else %}
 <p>Burnbird has no email address for you. It stores your GitHub primary address when GitHub marks it verified and lets Burnbird read it. To get run-out warnings by email, approve Burnbird's 'Email addresses' permission on GitHub if asked, then sign in again.</p>
+{% endif %}
+{% if data.paused_reason == "hard_bounce" %}
+<p>Email paused: your address bounced on {{ paused_on }}. To resume, make a working address your primary email on GitHub and sign in again, or write to hello@burnbird.racingcrow.com.</p>
 {% endif %}
 {% if off_by_link %}
 <p>Run-out warnings: off, turned off by the email link on {{ off_by_link }}. Turn them on again with the switch below.</p>

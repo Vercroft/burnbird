@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird import retention
 from burnbird.auth.service import ListedRepository, SignIn, session_digest, store_sign_in
-from burnbird.email import outbox, unsubscribe
+from burnbird.email import outbox, unsubscribe, webhook
 from burnbird.email.outbox import Mail
 from burnbird.email.preferences import set_choice
 from burnbird.github import backfill, reconcile, schemas
@@ -48,7 +48,7 @@ from burnbird.models import (
     WebhookDelivery,
     WorkerTask,
 )
-from tests.email.examples import RecordingSender, example_environment
+from tests.email.examples import RecordingSender, example_environment, webhook_event
 from tests.github import fakes
 from tests.github.fakes import FakeGithub, installation_item, repository_item
 
@@ -1279,24 +1279,34 @@ def test_two_workers_at_the_cap_send_once(
     sending: tuple[Mail, list[str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Room for one more email. The first worker holds the task row during its send; the second
-    # claims the other email, waits for the task row, then counts the first one's send.
+    # Room for one more email. The first worker has checked the cap and sent, and is paused
+    # before it records the outcome, still holding the task row; the second claims the other
+    # email, waits for the task row, then counts the first one's send. Without that lock the
+    # second would pass the cap check too and send a second email. Both emails are queued at the
+    # same time, so which worker takes which is not fixed: a tie in the claim's ORDER BY falls to
+    # the rows' place in the table, which a row deleted and vacuumed by an earlier test can
+    # change. Only the outcome is checked: one sent, one still queued.
     monkeypatch.setattr(outbox, "GLOBAL_CAP", 1)
     mail, events = sending
     first, second = 8123, 8124
     cleanup.extend([first, second])
-    _recipient(engine, first)
-    waiting = _recipient(engine, second)
+    emails = [_recipient(engine, first), _recipient(engine, second)]
     # The task row exists, as it does after the first send ever: only its lock makes the second
     # worker wait, not the first one's insert of it.
     with engine.begin() as connection:
         connection.execute(insert(WorkerTask).values(name=outbox.TASK, next_run_at=NOW))
 
-    _race(engine, _sends(mail), "SELECT user_email.address", _sends(mail))
+    _race(
+        engine,
+        _sends(mail),
+        lambda statement, _: statement.startswith("UPDATE email_outbox") and "state=" in statement,
+        _sends(mail),
+    )
 
     assert events == ["sent"]
     with Session(engine) as check:
-        assert check.get_one(EmailOutbox, waiting).state == "queued"
+        states = sorted(check.get_one(EmailOutbox, email).state for email in emails)
+        assert states == ["queued", "sent"]
 
 
 def test_an_unsubscribe_and_delete_my_data(engine: Engine, cleanup: list[int]) -> None:
@@ -1328,3 +1338,121 @@ def test_an_unsubscribe_and_delete_my_data(engine: Engine, cleanup: list[int]) -
 
     with Session(engine) as check:
         assert check.get(GithubUser, user_id) is None
+
+
+def _reports(kind: str, row_id: uuid.UUID, address: str) -> Path:
+    """The provider's webhook reporting ``kind`` for the outbox row, in one transaction."""
+    payload = webhook.Payload.model_validate(webhook_event(kind, str(row_id), address))
+    return _transaction(lambda session: webhook.apply(session, payload, NOW))
+
+
+def _address_of(user_id: int) -> str:
+    return f"u{user_id}" + "@" + "example.invalid"
+
+
+def test_a_hard_bounce_and_a_sign_in_with_a_new_address(
+    engine: Engine, cleanup: list[int]
+) -> None:
+    # The sign-in holds the user row and is paused before it stores the new address; the webhook
+    # waits for the user row, then finds the address changed and pauses nothing.
+    user_id = 8130
+    cleanup.append(user_id)
+    row_id = _recipient(engine, user_id)
+    new = f"new{user_id}" + "@" + "example.invalid"
+
+    _race(
+        engine,
+        _signs_in(replace(_sign_in(user_id, ()), email=new)),
+        "INSERT INTO user_email",
+        _reports("hardbounce", row_id, _address_of(user_id)),
+    )
+
+    with Session(engine) as check:
+        email = check.get_one(UserEmail, user_id)
+        assert (email.address, email.suppressed_at) == (new, None)
+
+
+def test_a_hard_bounce_and_the_daily_purge(engine: Engine, cleanup: list[int]) -> None:
+    # The webhook holds the user row and is paused before it pauses the stale address; the purge
+    # waits for the user row, then deletes the address.
+    user_id = 8131
+    cleanup.append(user_id)
+    row_id = _recipient(engine, user_id)
+    with engine.begin() as connection:
+        connection.execute(
+            update(UserEmail)
+            .where(UserEmail.user_id == user_id)
+            .values(read_at=NOW - timedelta(days=40))
+        )
+
+    _race(
+        engine,
+        _reports("hardbounce", row_id, _address_of(user_id)),
+        "UPDATE user_email",
+        _transaction(lambda session: retention.run_purges(session, NOW)),
+    )
+
+    with Session(engine) as check:
+        assert check.get(UserEmail, user_id) is None
+
+
+def test_a_hard_bounce_during_a_send(
+    engine: Engine, cleanup: list[int], sending: tuple[Mail, list[str]]
+) -> None:
+    # The send holds its task and outbox rows and is paused before it reads the address; the
+    # webhook locks neither, so it does not wait, and the send then finds the address paused.
+    mail, events = sending
+    user_id = 8132
+    cleanup.append(user_id)
+    row_id = _recipient(engine, user_id)
+
+    _race(
+        engine,
+        _sends(mail),
+        "SELECT user_email.address",
+        _then(
+            events,
+            "paused",
+            lambda session: webhook.apply(
+                session,
+                webhook.Payload.model_validate(
+                    webhook_event("hardbounce", str(row_id), _address_of(user_id))
+                ),
+                NOW,
+            ),
+        ),
+    )
+
+    assert events == ["paused"]
+    with Session(engine) as check:
+        row = check.get_one(EmailOutbox, row_id)
+        assert (row.state, row.outcome) == ("skipped", "suppressed")
+
+
+def test_a_report_held_up_while_the_user_deletes_and_returns_acts_on_nothing(
+    engine: Engine, cleanup: list[int]
+) -> None:
+    # The webhook has read the outbox row and is paused before it locks the user row; meanwhile
+    # the user deletes their data and signs up again with the same address. The report is about
+    # an email of the deleted account, so the new one is not paused.
+    user_id = 8137
+    cleanup.append(user_id)
+    row_id = _recipient(engine, user_id)
+
+    def delete_and_return(sessions: sessionmaker[Session]) -> None:
+        with sessions.begin() as session:
+            retention.delete_my_data(session, user_id)
+        with sessions.begin() as session:
+            session.add(GithubUser(id=user_id, login=f"example-{user_id}", last_sign_in_at=NOW))
+            session.flush()
+            session.add(UserEmail(user_id=user_id, address=_address_of(user_id), read_at=NOW))
+
+    _race(
+        engine,
+        _reports("hardbounce", row_id, _address_of(user_id)),
+        "SELECT github_user.id",
+        delete_and_return,
+    )
+
+    with Session(engine) as check:
+        assert check.get_one(UserEmail, user_id).suppressed_at is None

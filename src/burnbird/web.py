@@ -16,7 +16,9 @@ from burnbird.auth.config import AuthSettings, settings_from_environment
 from burnbird.auth.dependencies import AuthState
 from burnbird.auth.service import OAUTH_COOKIE, OAUTH_COOKIE_SECONDS, github_oauth
 from burnbird.database import database_url, make_engine
+from burnbird.email import config as email_config
 from burnbird.email import router as email
+from burnbird.email import webhook as email_webhook
 from burnbird.github import config
 from burnbird.github import router as github
 from burnbird.github.router import WebhookState
@@ -30,9 +32,16 @@ MAX_BODY_BYTES: Final = 1024 * 1024
 
 
 def create_app(
-    webhook_secret: bytes, sessions: sessionmaker[Session], auth_settings: AuthSettings
+    webhook_secret: bytes,
+    sessions: sessionmaker[Session],
+    auth_settings: AuthSettings,
+    *,
+    email_webhook_key: bytes | None = None,
 ) -> FastAPI:
-    """Create the app with its security headers, body limit, OAuth state cookie and routers."""
+    """Create the app with its security headers, body limit, OAuth state cookie and routers.
+
+    The provider's email webhook is served only with its key: without one there is no route.
+    """
     # No generated API pages: the site serves only its own pages and loads nothing from elsewhere.
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(RequestBodyLimitMiddleware, max_body_size=MAX_BODY_BYTES)
@@ -57,6 +66,11 @@ def create_app(
     app.include_router(auth.router)
     app.include_router(account.router)
     app.include_router(email.router)
+    if email_webhook_key is not None:
+        app.state.email_webhook = email_webhook.EmailWebhookState(
+            email_webhook_key, sessions, lambda: datetime.now(UTC)
+        )
+        app.include_router(email_webhook.router)
     return app
 
 
@@ -67,4 +81,5 @@ def app_from_environment() -> FastAPI:
         config.webhook_secret(),
         sessionmaker(make_engine(database_url())),
         settings_from_environment(),
+        email_webhook_key=email_config.webhook_key(),
     )

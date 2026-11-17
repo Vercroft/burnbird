@@ -6,6 +6,9 @@ breaks, quotes, control and non-ASCII characters are refused, so a token pasted 
 start, not at the first send.
 The API URL defaults to the provider's India data centre, from its "Multiple Data Centers" page.
 ``smtp`` mode sends only to a loopback host, so it can never reach a real mail server.
+
+The provider's webhook is served only when ``BURNBIRD_ZOHO_WEBHOOK_KEY_FILE`` names the file of
+its Authentication Key; a file that is named but cannot be read, or is empty, stops the start.
 """
 
 import os
@@ -19,6 +22,7 @@ MODE_VARIABLE: Final = "BURNBIRD_EMAIL_MODE"
 API_URL_VARIABLE: Final = "BURNBIRD_ZOHO_API_URL"
 API_KEY_FILE_VARIABLE: Final = "BURNBIRD_ZOHO_API_KEY_FILE"
 SMTP_URL_VARIABLE: Final = "BURNBIRD_SMTP_URL"
+WEBHOOK_KEY_FILE_VARIABLE: Final = "BURNBIRD_ZOHO_WEBHOOK_KEY_FILE"
 DEFAULT_API_URL: Final = "https://cpaas.zoho.in/v1.1/email"
 # The scheme the provider puts before the token in its Authorization header; never in the file.
 AUTHORIZATION_SCHEME: Final = "Zoho-enczapikey"
@@ -92,3 +96,10 @@ def _send_token() -> str:
             " prefix, spaces, line breaks or quotes"
         )
     return token
+
+
+def webhook_key() -> bytes | None:
+    """Return the webhook's Authentication Key, or None when no file is named for it."""
+    if not os.environ.get(WEBHOOK_KEY_FILE_VARIABLE):
+        return None
+    return read_secret_file(WEBHOOK_KEY_FILE_VARIABLE)

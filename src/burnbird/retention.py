@@ -227,6 +227,10 @@ def lock_repositories(
     level 4 row, during the provider call, and nothing else of this order. Delete my data, a
     revoke and an uninstall delete outbox rows before the user's address and the account, so
     they wait for a send in progress, and nothing is sent after they commit.
+
+    The email provider's webhook takes the user rows it reports on (level 3, ID order, FOR NO KEY
+    UPDATE), then each user's address and choices (level 4), and nothing else of this order; the
+    outbox row it is about is read without a lock.
     """
     read, key_share = _FOR_UPDATE[lock]
     session.execute(

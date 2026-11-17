@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from jinja2 import ChoiceLoader, DictLoader, Environment, Template
 
@@ -72,3 +73,44 @@ class RecordingSender:
         if self.on_send is not None:
             self.on_send()
         return self.results.pop(0) if self.results else Result("sent", "http:200", "req-example")
+
+
+def webhook_event(kind: str, reference: str, address: str) -> dict[str, Any]:
+    """A provider webhook body in the documented shape, with invented values only.
+
+    ``kind`` is the event's object (``hardbounce``, ``softbounce``, ``fbl_complaint``,
+    ``email_open``); the reported address goes where that event names it.
+    """
+    at = "2026-11-17T09:00:00Z"
+    if kind in ("hardbounce", "softbounce"):
+        details: dict[str, Any] = {
+            "reason": "example-reason",
+            "bounced_recipient": address,
+            "time": at,
+            "diagnostic_message": "example-diagnostic",
+        }
+    elif kind == "fbl_complaint":
+        details = {"fblFrom": address, "returnPath": "bounce", "from": "sender", "to": address}
+    else:
+        details = {"time": at}
+    return {
+        "event_name": [kind],
+        "event_message": [
+            {
+                "email_info": {
+                    "client_reference": reference,
+                    "email_reference": "example-trace",
+                    "is_smtp_trigger": False,
+                    "subject": "Example",
+                    "from": {"address": "sender", "name": "Burnbird"},
+                    "to": [{"email_address": {"address": address, "name": ""}}],
+                    "processed_time": at,
+                    "object": "email",
+                },
+                "event_data": [{"details": [details], "object": kind}],
+                "request_id": "example-request",
+            }
+        ],
+        "mailagent_key": "example-agent",
+        "webhook_request_id": "example-webhook-request",
+    }

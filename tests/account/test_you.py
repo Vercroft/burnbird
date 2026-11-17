@@ -305,6 +305,30 @@ def test_warnings_turned_off_on_the_page_do_not_name_the_email_link(
     assert "turned off by the email link" not in client.get("/you").text
 
 
+def test_a_bounced_address_says_how_email_resumes(
+    client: TestClient, signed_in: str, session: Session
+) -> None:
+    email = session.get_one(UserEmail, USER)
+    email.suppressed_at, email.suppressed_reason = NOW + timedelta(days=2), "hard_bounce"
+    session.flush()
+    page = _text(client.get("/you").text)
+    # A bounce's pause ends only with a new address (or by hand), so the page says exactly that.
+    contact = "hello" + "@" + "burnbird.racingcrow.com"
+    day = _day(NOW + timedelta(days=2))
+    assert (
+        f"Email paused: your address bounced on {day}. To resume, make a working address your "
+        f"primary email on GitHub and sign in again, or write to {contact}."
+    ) in page
+    # Nothing is sent to a paused address, so the page promises no warnings.
+    assert "Warnings continue until" not in page
+
+
+def test_an_address_that_is_not_paused_says_nothing_of_a_pause(
+    client: TestClient, signed_in: str
+) -> None:
+    assert "Email paused" not in client.get("/you").text
+
+
 def _day(when: datetime) -> str:
     return when.astimezone(UTC).strftime("%d %b %Y")
 

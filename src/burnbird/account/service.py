@@ -36,6 +36,9 @@ class YourData:
     # When an email's one-click link turned the warnings off, if that is why they are off now: a
     # link checker can follow it unseen, so the page says so.
     warnings_off_by_link: datetime | None
+    # Why and since when email to the address is paused (a hard bounce, a spam report), if it is.
+    paused_reason: str | None
+    paused_at: datetime | None
     sessions: tuple[SignedInSession, ...]
     # The logins of the accounts the user could see at their last sign-in.
     accounts: tuple[str, ...]
@@ -77,6 +80,8 @@ def your_data(session: Session, user_id: int, now: datetime) -> YourData:
         read_at=None if email is None else email.read_at,
         warnings=warnings,
         warnings_off_by_link=off_by_link,
+        paused_reason=None if email is None else email.suppressed_reason,
+        paused_at=None if email is None else email.suppressed_at,
         sessions=tuple(SignedInSession(device, started) for device, started in sessions),
         accounts=tuple(accounts),
     )

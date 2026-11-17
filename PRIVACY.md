@@ -41,6 +41,8 @@ browser sends to describe itself.
 Everything above is used to provide the service you signed up for: showing your CI minutes and when they run out.
 Run-out warnings and service notices by email, when they start, are part of that service, and you can turn the
 warnings off with the switch on your "Your data" page (/you). News about Burnbird will be sent only if you ask for it.
+If an email bounces for good, email to that address is paused. To resume, make a working address your primary email
+on GitHub and sign in again, or write to hello@burnbird.racingcrow.com.
 
 ## Who else handles it
 

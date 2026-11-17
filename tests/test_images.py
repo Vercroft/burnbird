@@ -13,7 +13,7 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 DEPENDABOT = ROOT / ".github" / "dependabot.yml"
 
 # Image name: True when its majors are held back (a database, runtime or base image).
-HELD = {"postgres": True}
+HELD = {"postgres": True, "axllent/mailpit": False}
 
 IMAGE_LINE = re.compile(r"^\s*image:\s*(\S+)\s*$", re.MULTILINE)
 MAJOR = re.escape('"version-update:semver-major"')

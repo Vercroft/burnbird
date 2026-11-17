@@ -3,6 +3,7 @@ import json
 import logging
 import secrets
 import sys
+import time
 
 import pytest
 
@@ -95,3 +96,36 @@ def test_configure_sends_every_line_through_the_redacting_formatter(
     written = capsys.readouterr().err
     assert token not in written
     assert f"WARNING anything: token {REDACTED}" in written
+
+
+def test_an_email_address_is_masked_to_its_first_letter_and_domain() -> None:
+    # Planted at run time, on the reserved example.invalid domain.
+    address = "person." + "planted" + "@" + "example.invalid"
+    assert redact(f"sent to {address} today") == "sent to p***@example.invalid today"
+
+
+@pytest.mark.parametrize(
+    ("local", "domain", "masked"),
+    [
+        ("_x", "example.invalid", "_***@example.invalid"),
+        ("o'brien", "example.invalid", "o***@example.invalid"),
+        ("jos\u00e9", "example.invalid", "j***@example.invalid"),
+        ("a", "b\u00fccher.invalid", "a***@b\u00fccher.invalid"),
+    ],
+    ids=["underscore first", "apostrophe", "accented", "accented domain"],
+)
+def test_an_unusual_address_is_masked_whole(local: str, domain: str, masked: str) -> None:
+    assert redact(f"to {local}" + "@" + f"{domain} now") == f"to {masked} now"
+
+
+def test_the_site_s_own_domain_is_not_masked() -> None:
+    # A message's ID names its outbox row: kept readable in a log.
+    message_id = "<00000000-0000-0000-0000-000000000009" + "@" + "burnbird.racingcrow.com>"
+    assert redact(f"Message-ID {message_id}") == f"Message-ID {message_id}"
+
+
+def test_masking_takes_linear_time_on_a_long_line() -> None:
+    line = "a." * 20_000
+    started = time.perf_counter()
+    redact(line)
+    assert time.perf_counter() - started < 0.1

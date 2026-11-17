@@ -1,0 +1,7 @@
+{% block body %}{% endblock %}
+
+--
+{% if unsubscribe_url %}Stop run-out warnings with one click: {{ unsubscribe_url }}
+Or change your email choices on your "Your data" page: {{ origin }}/you
+
+{% endif %}{{ footer }}

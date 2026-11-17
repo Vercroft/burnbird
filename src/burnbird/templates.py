@@ -1,8 +1,9 @@
-"""The one Jinja2 environment for every page: autoescaped HTML, templates shipped in the package.
+"""The one Jinja2 environment for every page and email: autoescaped HTML, templates in the package.
 
 Shared templates (the base layout) are in ``burnbird/templates``; a feature's own templates are in
 its folder's ``templates`` and are named with the feature as a prefix, such as
-``account/you.html``. Autoescaping is on for every ``.html`` template, so a value is always shown
+``account/you.html``; an email's layout is ``email/layout.html`` and ``email/layout.txt``.
+Autoescaping is on for every ``.html`` template, so a value is always shown
 as text: "When autoescaping is enabled, everything is escaped by default except for values
 explicitly marked as safe" (Jinja's template documentation, "HTML Escaping"). An undefined name
 fails the render instead of showing nothing.
@@ -23,7 +24,12 @@ from jinja2 import (
 ENVIRONMENT: Final = Environment(
     loader=ChoiceLoader(
         [
-            PrefixLoader({"account": PackageLoader("burnbird.account", "templates")}),
+            PrefixLoader(
+                {
+                    "account": PackageLoader("burnbird.account", "templates"),
+                    "email": PackageLoader("burnbird.email", "templates"),
+                }
+            ),
             PackageLoader("burnbird", "templates"),
         ]
     ),

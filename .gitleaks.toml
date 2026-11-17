@@ -68,3 +68,42 @@ regexes = ['''(?i)^(?:adr\.github\.io|bford\.info|biomejs\.dev|blessed\.rs|blog\
 [[rules.allowlists]]
 description = "reviewed hosts this repository alone cites"
 regexes = ['''(?i)^(?:cheatsheetseries\.owasp\.org|cpaas\.zoho\.in|docs\.blacksmith\.sh|docs\.stripe\.com)$''']
+
+
+# ---------------------------------------------------------------------------
+# Burnbird's own secret formats and the provider tokens the default rules miss
+# (engineering-practices 7C.6). Go RE2, so a token's end is a character outside
+# its alphabet or the end of the line; the entropy floor keeps word placeholders out.
+
+# A session id in its cookie: secrets.token_urlsafe(32), 43 base64url characters, in the
+# cookie named in src/burnbird/auth/service.py (SESSION_COOKIE).
+[[rules]]
+id = "burnbird-session-cookie"
+description = "Burnbird session id in its cookie"
+regex = '''__Host-burnbird_session=([A-Za-z0-9_-]{43})(?:[^A-Za-z0-9_-]|$)'''
+secretGroup = 1
+entropy = 3.5
+keywords = ["__host-burnbird_session="]
+
+# An email's one-click unsubscribe token: secrets.token_urlsafe(32) in the link's path
+# (src/burnbird/email/outbox.py; the route in src/burnbird/email/router.py). It turns a
+# user's warnings off, so a whole link is a secret too.
+[[rules]]
+id = "burnbird-unsubscribe-token"
+description = "Burnbird one-click unsubscribe token in its link"
+regex = '''/email/unsubscribe/([A-Za-z0-9_-]{43})(?:[^A-Za-z0-9_-]|$)'''
+secretGroup = 1
+entropy = 3.5
+keywords = ["/email/unsubscribe/"]
+
+# GitHub App installation tokens in the stateless form: "Starting April 27, 2026, GitHub
+# began a staged rollout of a stateless format (ghs_APPID_JWT) to all newly minted GitHub
+# App installation tokens" (https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/about-authentication-to-github).
+# The default github-app-token rule expects 36 letters and digits after ghs_, so it misses
+# this form; a JWT is three base64url parts joined by dots.
+[[rules]]
+id = "github-app-installation-token-stateless"
+description = "GitHub App installation token, stateless form (ghs_APPID_JWT)"
+regex = '''(ghs_[0-9]+_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)'''
+secretGroup = 1
+keywords = ["ghs_"]

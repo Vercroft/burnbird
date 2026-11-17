@@ -8,21 +8,13 @@ on:
 permissions: {}
 
 jobs:
+  # The full-history scan from Vercroft's shared workflow (engineering-practices 7C.6), with this
+  # repository's .gitleaks.toml, on its default runner, ubuntu-latest.
   secrets:
     name: gitleaks
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    uses: Vercroft/.github/.github/workflows/gitleaks.yml@f6f6aee14ba293fad8f1fd18d1f077ae58f5e59e # v1.1.0
     permissions:
       contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: gacts/gitleaks@4fd785dcdaf557fda64e05b0ae033b8f7d82fb81 # v1.3.3
-        with:
-          version: 8.30.1
-          config-path: .gitleaks.toml
 
   workflows:
     name: zizmor

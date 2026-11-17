@@ -23,6 +23,9 @@ EXEMPT = {
     # RFC 8058's one-click POST comes from the mail client with no cookie or other context: the
     # token in the path is its only proof, and it can only turn a kind of email off.
     "/email/unsubscribe/{token}",
+    # The email provider's webhook proves itself with its HMAC over the raw body, and carries no
+    # session.
+    "/email/webhook",
 }
 
 
@@ -45,7 +48,10 @@ def _calls(dependant: Dependant) -> Iterator[object]:
 def test_every_post_but_the_exempt_ones_checks_csrf(
     sessions: sessionmaker[Session], auth_settings: AuthSettings
 ) -> None:
-    app = create_app(secrets.token_bytes(32), sessions, auth_settings)
+    # With the email webhook's key, so its route is there to be checked.
+    app = create_app(
+        secrets.token_bytes(32), sessions, auth_settings, email_webhook_key=secrets.token_bytes(32)
+    )
     posts = {
         route.path: route
         for route in _api_routes(app.routes)

@@ -50,6 +50,7 @@ def show(request: Request, user: Annotated[int | None, Depends(current_user)]) -
         data=data,
         read_at=None if data.read_at is None else _moment(data.read_at),
         warnings_until=None if until is None else _day(until),
+        off_by_link=None if data.warnings_off_by_link is None else _day(data.warnings_off_by_link),
         sessions=[(s.device or "Unknown device", _moment(s.started_at)) for s in data.sessions],
         consent_text=consent.TEXT,
         warnings_field=WARNINGS_FIELD,

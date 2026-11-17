@@ -44,11 +44,20 @@ def write_defaults(session: Session, user_id: int, now: datetime) -> int:
     return len(written)
 
 
-def set_choice(session: Session, user_id: int, kind: str, enabled: bool, now: datetime) -> bool:
+def set_choice(
+    session: Session,
+    user_id: int,
+    kind: str,
+    enabled: bool,
+    now: datetime,
+    source: str = "settings",
+) -> bool:
     """Set one choice the user made; return whether it changed.
 
     The row is locked first, so two saves at once record one change. A repeat changes nothing and
     writes no consent row. A user with no row (no address was ever stored) changes nothing.
+    ``source`` says where the choice was made: ``settings`` (the "Your data" switch) or
+    ``one_click`` (an email's unsubscribe link).
     """
     current = session.scalar(
         select(EmailPreference)
@@ -59,7 +68,7 @@ def set_choice(session: Session, user_id: int, kind: str, enabled: bool, now: da
         return False
     current.enabled = enabled
     current.updated_at = now
-    _record(session, user_id, kind, enabled, "settings", now)
+    _record(session, user_id, kind, enabled, source, now)
     return True
 
 

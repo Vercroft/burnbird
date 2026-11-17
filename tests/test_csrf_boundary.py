@@ -17,8 +17,13 @@ from burnbird.auth.config import AuthSettings
 from burnbird.auth.dependencies import csrf_protected
 from burnbird.web import create_app
 
-# GitHub's webhook proves itself with its HMAC signature, and carries no session.
-EXEMPT = {"/github/webhook"}
+EXEMPT = {
+    # GitHub's webhook proves itself with its HMAC signature, and carries no session.
+    "/github/webhook",
+    # RFC 8058's one-click POST comes from the mail client with no cookie or other context: the
+    # token in the path is its only proof, and it can only turn a kind of email off.
+    "/email/unsubscribe/{token}",
+}
 
 
 def _api_routes(routes: list[BaseRoute]) -> Iterator[APIRoute]:

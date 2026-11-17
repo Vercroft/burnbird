@@ -7,6 +7,8 @@ paused one goes on. Both must finish. A deadlock would make Postgres abort one o
 test fails with its error.
 """
 
+import hashlib
+import secrets
 import threading
 import time
 import uuid
@@ -19,12 +21,12 @@ from typing import Any
 import httpx2
 import pytest
 from joserfc.jwk import RSAKey
-from sqlalchemy import Connection, Engine, delete, event, insert, select, text
+from sqlalchemy import Connection, Engine, delete, event, insert, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird import retention
 from burnbird.auth.service import ListedRepository, SignIn, session_digest, store_sign_in
-from burnbird.email import outbox
+from burnbird.email import outbox, unsubscribe
 from burnbird.email.outbox import Mail
 from burnbird.email.preferences import set_choice
 from burnbird.github import backfill, reconcile, schemas
@@ -1295,3 +1297,34 @@ def test_two_workers_at_the_cap_send_once(
     assert events == ["sent"]
     with Session(engine) as check:
         assert check.get_one(EmailOutbox, waiting).state == "queued"
+
+
+def test_an_unsubscribe_and_delete_my_data(engine: Engine, cleanup: list[int]) -> None:
+    # The one-click POST holds the user's warnings choice and is paused before its consent row;
+    # Delete my data takes the user row (FOR NO KEY UPDATE, which the consent row's FOR KEY SHARE
+    # does not wait for) and waits for the choice.
+    user_id = 8125
+    cleanup.append(user_id)
+    row_id = _recipient(engine, user_id)
+    token = secrets.token_urlsafe(32)
+    with engine.begin() as connection:
+        connection.execute(
+            update(EmailOutbox)
+            .where(EmailOutbox.id == row_id)
+            .values(
+                state="sent",
+                finished_at=NOW,
+                retry_at=None,
+                unsubscribe_sha256=hashlib.sha256(token.encode()).digest(),
+            )
+        )
+
+    _race(
+        engine,
+        _transaction(lambda session: unsubscribe.turn_off(session, token, NOW)),
+        "INSERT INTO email_consent",
+        _delete_my_data(user_id),
+    )
+
+    with Session(engine) as check:
+        assert check.get(GithubUser, user_id) is None

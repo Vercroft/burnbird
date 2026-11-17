@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block main %}
+<p>Stop getting run-out warnings by email? You can turn them on again on your "Your data" page.</p>
+<form method="post" action="/email/unsubscribe/{{ token }}">
+<p><button type="submit">Stop run-out warnings</button></p>
+</form>
+{% endblock %}

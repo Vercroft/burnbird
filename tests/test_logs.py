@@ -58,6 +58,34 @@ def test_secrets_in_headers_bodies_and_urls_are_redacted(line: str) -> None:
     assert REDACTED in redacted
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        'INFO: 203.0.113.9:0 - "POST /email/unsubscribe/{token} HTTP/1.1" 200',
+        "GET /email/unsubscribe/{token}",
+        "link https://burnbird.example.invalid/email/unsubscribe/{token} sent",
+        "List-Unsubscribe: <https://burnbird.example.invalid/email/unsubscribe/{token}>",
+        "{{'url': '/email/unsubscribe/{token}'}}",
+        "/email/unsubscribe/{token}?x=1",
+    ],
+)
+def test_an_unsubscribe_link_s_token_is_redacted(line: str) -> None:
+    # The token turns a user's warnings off: a log line keeps the path, never the token.
+    token = secrets.token_urlsafe(32)
+    redacted = redact(line.format(token=token))
+    assert token not in redacted
+    assert f"/email/unsubscribe/{REDACTED}" in redacted
+
+
+def test_the_formatter_redacts_an_unsubscribe_token_in_arguments() -> None:
+    token = secrets.token_urlsafe(32)
+    record = logging.LogRecord(
+        "test", logging.INFO, __file__, 1, "GET %s", (f"/email/unsubscribe/{token}",), None
+    )
+    output = RedactingFormatter("%(message)s").format(record)
+    assert output == f"GET /email/unsubscribe/{REDACTED}"
+
+
 def test_ordinary_text_is_left_alone() -> None:
     line = "sign-in: user 7001, 2 installations (0 skipped), 3 repositories; status code 502"
     assert redact(line) == line

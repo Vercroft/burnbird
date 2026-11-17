@@ -182,7 +182,11 @@ def lock_repositories(
     reconciliation, a backfill run, the backfill queue and a re-queue, and the daily purge follow
     it. The queue and a re-queue also insert their queued rows in ID order, so the two at once
     never each wait for the other's new row: Postgres inserts an INSERT ... SELECT's rows in its
-    ORDER BY order in practice, though it does not document it.
+    ORDER BY order in practice, though it does not document it. One known exception is left: a
+    sign-in reads its accounts' stale installations before it locks anything, so one that another
+    path (a webhook or the reconciliation) stores for one of those accounts after that read is
+    uninstalled by ``store_installation`` after the sign-in holds its repositories and lower
+    accounts.
     """
     read, key_share = _FOR_UPDATE[lock]
     session.execute(

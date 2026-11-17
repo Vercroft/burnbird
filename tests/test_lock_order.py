@@ -482,9 +482,13 @@ def _lists(github: FakeGithub, *installations: schemas.Installation) -> None:
     ]
 
 
-def _reconciles(app: GithubApp) -> Path:
+def _reconciles(app: GithubApp, completes: list[bool] | None = None) -> Path:
+    """Run the reconciliation; record in ``completes`` whether it stored every listed item."""
+
     def run(sessions: sessionmaker[Session]) -> None:
-        reconcile.reconcile(sessions, app, NOW)
+        complete, _ = reconcile.reconcile(sessions, app, NOW)
+        if completes is not None:
+            completes.append(complete)
 
     return run
 
@@ -867,3 +871,61 @@ def test_two_requeues_insert_in_id_order(engine: Engine, cleanup: list[int]) -> 
         ).all()
     # The second re-queue waited for the first and raised both rows' generation.
     assert generations == [1, 1]
+
+
+def test_the_reconciliation_storing_a_new_lower_account_and_a_sign_in(
+    engine: Engine, cleanup: list[int], github_app: tuple[FakeGithub, GithubApp]
+) -> None:
+    # GitHub lists a new account's installation and a stored higher account's. The new account
+    # was installed again meanwhile: the sign-in lists its newer installation, and the higher one.
+    # Paused before the reconciliation inserts the new account.
+    github, app = github_app
+    user_id, new, higher = 8012, 8013, 8014
+    cleanup.extend([user_id, new, higher])
+    stored = _installation(5014, higher, "Organization")
+    listed = _installation(5013, new, "Organization")
+    again = _installation(5015, new, "Organization")
+    _stored(engine, stored)
+    _lists(github, listed, stored)
+    completes: list[bool] = []
+
+    _race(
+        engine,
+        _reconciles(app, completes),
+        _inserts("account", new),
+        _signs_in(_sign_in(user_id, (again, stored))),
+    )
+
+    with Session(engine) as check:
+        # The sign-in stored the new account first; the reconciliation left it as it was.
+        assert check.get(Installation, again.id) is not None
+        assert check.get(Installation, listed.id) is None
+        assert check.get(Installation, stored.id) is not None
+    # The new account's installation was left to the next run.
+    assert completes == [False]
+
+
+def test_the_reconciliation_and_a_sign_in_installing_a_new_account_again(
+    engine: Engine, cleanup: list[int], github_app: tuple[FakeGithub, GithubApp]
+) -> None:
+    # GitHub lists a new account's installation; the sign-in stores a newer one for the same
+    # account and is paused before it commits.
+    github, app = github_app
+    user_id, new = 8015, 8016
+    cleanup.extend([user_id, new])
+    listed = _installation(5016, new, "Organization")
+    again = _installation(5017, new, "Organization")
+    _lists(github, listed)
+    completes: list[bool] = []
+
+    _race(
+        engine,
+        _signs_in(_sign_in(user_id, (again,))),
+        "INSERT INTO github_user",
+        _reconciles(app, completes),
+    )
+
+    with Session(engine) as check:
+        assert check.get(Installation, again.id) is not None
+        assert check.get(Installation, listed.id) is None
+    assert completes == [False]

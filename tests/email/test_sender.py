@@ -51,9 +51,9 @@ def _answer(status: int, body: Any = None) -> Callable[[httpx2.Request], httpx2.
     return lambda _: httpx2.Response(status, json=body if body is not None else {})
 
 
-def _raise(error: type[Exception]) -> Callable[[httpx2.Request], httpx2.Response]:
+def _raise(error: type[httpx2.RequestError]) -> Callable[[httpx2.Request], httpx2.Response]:
     def handle(request: httpx2.Request) -> httpx2.Response:
-        raise error("example", request=request)  # type: ignore[call-arg]
+        raise error("example", request=request)
 
     return handle
 

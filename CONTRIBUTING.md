@@ -24,7 +24,7 @@ specific here.
 
 Set up once: install [uv](https://docs.astral.sh/uv/), which installs the Python version in `.python-version`;
 `uv sync --locked`; `pre-commit install`, whose hook runs the same gitleaks check with `.gitleaks.toml` as the
-`gitleaks` CI job; and `VENV="${TMPDIR:-/tmp}/burnbird-venv"; python3 -m venv "$VENV"` for the workflow audit. Each
+`gitleaks / gitleaks` CI check; and `VENV="${TMPDIR:-/tmp}/burnbird-venv"; python3 -m venv "$VENV"` for the workflow audit. Each
 row is what CI runs, in the job named in the last column.
 
 The storage tests need a throwaway Postgres, named in `BURNBIRD_TEST_DATABASE_URL`; without it they fail, never skip.
@@ -71,7 +71,7 @@ docker stop burnbird-test-mailpit
 | Run the tests, with the test Postgres and Mailpit (one test: `uv run --locked pytest tests/test_package.py`) | `uv run --locked pytest` | Python |
 | Check every locked package is at least 7 days old | `uv lock --check` | dependency-age |
 | Check every image your branch adds is at least 7 days old (needs Docker with buildx) | `python3 scripts/check-image-age.py --base origin/main` | dependency-age |
-| Scan for secrets | `pre-commit run --all-files` | gitleaks |
+| Scan for secrets (CI scans the full history through Vercroft's shared workflow) | `pre-commit run --all-files` | gitleaks / gitleaks |
 | Audit the workflows | `"$VENV/bin/pip" install --require-hashes -r .github/requirements/zizmor.txt`, then `"$VENV/bin/zizmor" --offline .github/workflows` | zizmor |
 | Test the commit policy | `python3 -m unittest discover --start-directory .github/scripts --pattern 'test_*.py'` | Commit policy |
 | Check your commits | `BASE_SHA=$(git merge-base origin/main HEAD) HEAD_SHA=HEAD ALLOWED_COMMIT_IDENTITIES=<your noreply address> python3 .github/scripts/commit_policy.py` | Commit policy |

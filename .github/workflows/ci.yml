@@ -8,14 +8,6 @@ on:
 permissions: {}
 
 jobs:
-  # The full-history scan from Vercroft's shared workflow (engineering-practices 7C.6), with this
-  # repository's .gitleaks.toml, on its default runner, ubuntu-latest.
-  secrets:
-    name: gitleaks
-    uses: Vercroft/.github/.github/workflows/gitleaks.yml@f6f6aee14ba293fad8f1fd18d1f077ae58f5e59e # v1.1.0
-    permissions:
-      contents: read
-
   workflows:
     name: zizmor
     runs-on: ubuntu-latest
@@ -142,3 +134,48 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           ALLOWED_COMMIT_IDENTITIES: ${{ vars.ALLOWED_COMMIT_IDENTITIES }}
         run: python3 .github/scripts/commit_policy.py
+
+  # No em or en dash in any tracked file. Nothing is exempt.
+  dashes:
+    name: No em or en dashes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Find em and en dashes
+        run: |
+          if git grep -nP '[\x{2013}\x{2014}]'; then
+            echo "Use a hyphen, a colon or a new sentence instead of the dashes above." >&2
+            exit 1
+          fi
+
+  # The one CI check the ruleset requires, so a job here can be renamed without a ruleset change.
+  # `if: always()` so a failed job cannot skip it; it fails unless every job it needs passed or was
+  # skipped. Only Commit policy is ever skipped: it runs on pull requests only, so on a push to main
+  # it is skipped and counts as passed. tests/test_gate_summary.py fails when a job in this file is
+  # missing from `needs`, when the verdict accepts a failure, or when another job gets an `if:`.
+  gate-summary:
+    name: Gate summary
+    if: always()
+    needs: [workflows, python, suppressions, commit-policy, dashes]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require every needed job to have passed or been skipped
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          results = {job: need["result"] for job, need in json.loads(os.environ["NEEDS_JSON"]).items()}
+          for job, result in sorted(results.items()):
+              print(f"{job}: {result}")
+          bad = sorted(f"{job}={result}" for job, result in results.items() if result not in ("success", "skipped"))
+          if not results or bad:
+              sys.exit("not every needed job passed or was skipped: " + (", ".join(bad) or "no jobs"))
+          PY

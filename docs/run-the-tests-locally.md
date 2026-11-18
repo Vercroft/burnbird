@@ -33,7 +33,8 @@ firewall that blocks traffic to container addresses does not stop them.
    export BURNBIRD_TEST_SMTP_URL=smtp://127.0.0.1:1025 BURNBIRD_TEST_MAILPIT_URL=http://localhost:8025
    ```
 
-4. Run the tests: `uv run --locked pytest`.
+4. Run the tests: `uv run --locked pytest`. They run in parallel, each worker in its own database, which the tests
+   make and drop.
 
 5. Stop both when you are done:
 

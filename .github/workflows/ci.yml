@@ -84,7 +84,7 @@ jobs:
       - name: Types
         run: uv run --locked mypy
       - name: One Python version everywhere
-        run: uv run --locked pytest tests/test_python_version.py
+        run: uv run --locked pytest -n 0 tests/test_python_version.py
       - name: Tests
         run: uv run --locked pytest
 

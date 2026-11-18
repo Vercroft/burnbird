@@ -95,7 +95,10 @@ enable_error_code = [
 
 [tool.pytest]
 testpaths = ["tests"]
-addopts = ["--import-mode=importlib"]
+# One worker per CPU (pytest-xdist), each with its own database. Measured 2026-11-18: 52
+# connections at peak over 16 workers, 3.25 per worker on average, so 27 workers stay under 90 of
+# Postgres's default 100.
+addopts = ["--import-mode=importlib", "-n", "auto", "--maxprocesses", "27"]
 strict = true
 
 [tool.uv]

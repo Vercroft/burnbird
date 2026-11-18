@@ -76,7 +76,7 @@ docker stop burnbird-test-mailpit
 | Test the commit policy | `python3 -m unittest discover --start-directory .github/scripts --pattern 'test_*.py'` | Commit policy |
 | Check your commits | `BASE_SHA=$(git merge-base origin/main HEAD) HEAD_SHA=HEAD ALLOWED_COMMIT_IDENTITIES=<your noreply address> python3 .github/scripts/commit_policy.py` | Commit policy |
 | Check the links | `lychee --offline --no-progress './**/*.md'` | Local links |
-| Check the suppression listing | the `Suppressions are listed` step of `.github/workflows/ci.yml` | Suppressions are listed |
+| Check the suppression listing | `sh scripts/check-suppressions.sh` | Suppressions are listed |
 | Check no file has an em or en dash (no output means none) | `git grep -nP '[\x{2013}\x{2014}]'` | No em or en dashes |
 
 `Gate summary` passes only when every CI job above passed or was skipped (Commit policy is skipped on a push to
@@ -118,7 +118,7 @@ messages, the pull request title or its description. Its output names only the c
 | `src/burnbird/retention.py` | What is deleted and when: jobs after 90 days, deliveries after 7, expired sessions, email addresses no sign-in read in 30 days, finished outbox emails after 62 days (all five through `run_purges`), "Delete my data", a revoked authorization, an uninstall, and repositories removed from an installation; `lock_repositories` writes down the lock order every path follows |
 | `tests/test_public_text.py` | Fails on any email or IP address in a tracked file that is not on its allowlist |
 | `tests/` | Its tests, in folders that mirror the feature folders (`tests/account/`, `tests/auth/`, `tests/billing/`, `tests/email/`, `tests/github/`), each with an `__init__.py` so mypy accepts the same test file name in two folders; `tests/conftest.py` gives the storage tests a migrated Postgres and rolls each test back |
-| `scripts/check-image-age.py`, `tests/test_check_image_age.py` | The image-age check and its test, vendored unchanged; `tests/test_vendored.py` holds their recorded sha256 |
+| `scripts/check-image-age.py`, `tests/test_check_image_age.py`, `scripts/check-suppressions.sh` | The image-age check and its test, and the suppressions check, vendored unchanged; `tests/test_vendored.py` holds their recorded sha256 |
 | `LICENSE` | The licence, FSL-1.1-MIT, unchanged except its copyright line |
 | `SECURITY.md` | How to report a vulnerability |
 | `.gitleaks.toml`, `.pre-commit-config.yaml` | The leak patterns and the commit-time hook; the `url-host` rule's last list holds the reviewed hosts only this repository cites |
@@ -225,8 +225,9 @@ One pull request:
   days old.
 - Python packages are pinned exactly in `pyproject.toml` and locked in `uv.lock`; uv refuses versions younger than 7
   days (`exclude-newer`) and source builds (`no-build`).
-- A suppression (`# noqa`, `# type: ignore` or `# zizmor: ignore[rule]`, each with a reason) is listed in
-  `.suppressions` as `path: comment`, sorted; the `Suppressions are listed` job fails on any difference.
+- A suppression (`# noqa: CODE  # reason` or `# type: ignore[code]  # reason`, one rule and a reason of 10 or more
+  characters) is listed in `.suppressions` as `path: comment`, sorted; `scripts/check-suppressions.sh` fails on any
+  difference or any other form.
 - Test fixtures never hold a real secret, a real person's address or an em or en dash: build planted values at run
   time.
 - The database URL comes only from the environment (`BURNBIRD_DATABASE_URL`; `BURNBIRD_TEST_DATABASE_URL` for the
@@ -236,7 +237,7 @@ One pull request:
   migrations differ.
 - Every image a workflow uses is pinned as `name:tag@sha256:<digest>` and written once; `tests/test_images.py` fails on
   a new image until it is classified.
-- `scripts/check-image-age.py` and `tests/test_check_image_age.py` are never edited here; a new version replaces both
-  files unchanged, with its new sha256 in `tests/test_vendored.py`.
+- `scripts/check-image-age.py`, `tests/test_check_image_age.py` and `scripts/check-suppressions.sh` are never edited
+  here; a new version replaces the file unchanged, with its new sha256 in `tests/test_vendored.py`.
 - `LICENSE` stays the published text, with only its copyright line filled in.
 - Call the licence "Fair Source (FSL-1.1-MIT)".

@@ -99,16 +99,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Compare the suppressions in the code with .suppressions
-        run: |
-          set -eu
-          export LC_ALL=C
-          found=$(mktemp)
-          # git grep exits 1 when nothing matches, which is a valid answer here.
-          {
-            git grep -H -E '#[[:space:]]*(noqa|type:[[:space:]]*ignore)' -- '*.py' || true
-            git grep -H -E '#[[:space:]]*[z]izmor:[[:space:]]*ignore\[' -- '.github/workflows/*.yml' || true
-          } | sed -E 's/^([^:]+):.*(#[[:space:]]*(noqa|type:|zizmor:).*)$/\1: \2/' | sort > "$found"
-          diff -u .suppressions "$found"
+        run: sh scripts/check-suppressions.sh
 
   commit-policy:
     name: Commit policy

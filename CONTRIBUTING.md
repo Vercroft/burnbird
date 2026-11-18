@@ -77,6 +77,7 @@ docker stop burnbird-test-mailpit
 | Check your commits | `BASE_SHA=$(git merge-base origin/main HEAD) HEAD_SHA=HEAD ALLOWED_COMMIT_IDENTITIES=<your noreply address> python3 .github/scripts/commit_policy.py` | Commit policy |
 | Check the links | `lychee --offline --no-progress './**/*.md'` | Local links |
 | Check the suppression listing | the `Suppressions are listed` step of `.github/workflows/ci.yml` | Suppressions are listed |
+| Check no file has an em or en dash (no output means none) | `git grep -nP '[\x{2013}\x{2014}]'` | No em or en dashes |
 
 The commit policy allows only approved people as author, committer and co-author (the organisation variable
 `ALLOWED_COMMIT_IDENTITIES`), only the trailer keys listed at the top of `.github/scripts/commit_policy.py`, only
@@ -119,7 +120,7 @@ messages, the pull request title or its description. Its output names only the c
 | `SECURITY.md` | How to report a vulnerability |
 | `.gitleaks.toml`, `.pre-commit-config.yaml` | The leak patterns and the commit-time hook; the `url-host` rule's last list holds the reviewed hosts only this repository cites |
 | `.github/CODEOWNERS` | Who reviews every change |
-| `.github/workflows/` | CI (Python with its Postgres and Mailpit services, zizmor, suppressions, commit policy), the secret scan (Vercroft's shared workflow), dependency-age (packages and images) and its daily re-run for Dependabot pull requests, links, CodeQL and Scorecard |
+| `.github/workflows/` | CI (Python with its Postgres and Mailpit services, zizmor, suppressions, commit policy, no dashes), the secret scan (Vercroft's shared workflow), dependency-age (packages and images) and its daily re-run for Dependabot pull requests, links, CodeQL and Scorecard |
 | `.github/scripts/` | The commit policy check and its tests |
 | `.github/requirements/` | Hash-pinned CI tools (zizmor) |
 | `.github/dependabot.yml` | Monthly grouped updates for the Python packages, the actions, the workflow images and the CI tools; `tests/test_images.py` checks the images are pinned and Postgres majors are held |

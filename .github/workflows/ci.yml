@@ -134,3 +134,21 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           ALLOWED_COMMIT_IDENTITIES: ${{ vars.ALLOWED_COMMIT_IDENTITIES }}
         run: python3 .github/scripts/commit_policy.py
+
+  # No em or en dash in any tracked file. Nothing is exempt.
+  dashes:
+    name: No em or en dashes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Find em and en dashes
+        run: |
+          if git grep -nP '[\x{2013}\x{2014}]'; then
+            echo "Use a hyphen, a colon or a new sentence instead of the dashes above." >&2
+            exit 1
+          fi

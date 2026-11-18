@@ -1,9 +1,41 @@
-# The git hook of standard §7C.6: gitleaks at commit time, with this repository's config.
+# Every small check is a hook (engineering-practices docs/required-checks.md): it runs at commit time, and CI's
+# Repository checks job runs every hook once. The hooks with stages: [manual] need a tool most contributors do not
+# have; CI runs them.
+minimum_pre_commit_version: "4.4.0"
 default_language_version:
   golang: 1.27.3
 repos:
+  # The git hook of standard §7C.6: gitleaks at commit time, with this repository's config.
   - repo: https://github.com/gitleaks/gitleaks
     rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e  # v8.30.1
     hooks:
       - id: gitleaks
         args: [--config=.gitleaks.toml]
+  - repo: local
+    hooks:
+      # pygrep matches bytes: the UTF-8 of U+2013 and U+2014. Nothing is exempt.
+      - id: dashes
+        name: No em or en dashes (use a hyphen, a colon or a new sentence)
+        language: pygrep
+        entry: '\xe2\x80[\x93\x94]'
+      - id: suppressions
+        name: Suppressions are listed
+        language: unsupported
+        entry: sh scripts/check-suppressions.sh
+        pass_filenames: false
+        always_run: true
+      - id: commit-policy-tests
+        name: The commit policy checker's tests
+        language: unsupported
+        entry: python3 -B -m unittest discover --start-directory .github/scripts --pattern test_*.py
+        files: ^\.github/scripts/
+        pass_filenames: false
+      # zizmor comes from .github/requirements/zizmor.txt (hash-pinned), not from its own hook repository, whose
+      # python hook pre-commit would install without hashes.
+      - id: zizmor
+        name: zizmor
+        language: unsupported
+        entry: zizmor --offline .github/workflows
+        files: ^\.github/workflows/
+        pass_filenames: false
+        stages: [manual]

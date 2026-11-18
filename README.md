@@ -3,6 +3,9 @@
 Every CI minute in one place: GitHub-hosted, third-party and self-hosted runners, with a forecast of the day your free
 minutes run out.
 
+[![CI](https://github.com/Vercroft/burnbird/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Vercroft/burnbird/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Vercroft/burnbird/badge)](https://scorecard.dev/viewer/?uri=github.com/Vercroft/burnbird)
+
 > [!NOTE]
 > In development, not live yet. It will run at burnbird.racingcrow.com.
 
@@ -22,22 +25,19 @@ billing or administration access and cannot change anything.
 
 We made the code public so you can check what Burnbird does with your data.
 
-## Development
+## How a change reaches main
 
-We use [uv](https://docs.astral.sh/uv/), which installs the Python version that `.python-version` names. Set up and
-run the checks that CI runs:
-
-```sh
-uv sync --locked
-uv run --locked ruff format --check
-uv run --locked ruff check
-uv run --locked mypy
-uv run --locked pytest
-uv lock --check
+```mermaid
+flowchart LR
+  PR[Pull request] --> Checks[Required checks: Gate summary, secret scan, CodeQL, dependency age, links]
+  Checks --> Approval[Maintainer approval on the head commit]
+  Approval --> Merge[Merge commit on main]
 ```
 
-The tests need a throwaway Postgres; CONTRIBUTING.md says how to start one. The full list of commands, with the CI
-job that runs each, is in [CONTRIBUTING.md](CONTRIBUTING.md).
+## Development
+
+Burnbird is not live yet, so there is nothing to run on its own. To install, test and lint, follow
+[CONTRIBUTING.md](CONTRIBUTING.md), which also says how to start the throwaway Postgres and Mailpit the tests need.
 
 ## Contributing and security
 

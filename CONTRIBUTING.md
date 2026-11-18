@@ -26,12 +26,8 @@ Set up once: install [uv](https://docs.astral.sh/uv/) (it installs the Python in
 | Run one test file | `uv run --locked pytest -n 0 tests/test_package.py` | none |
 | Check every locked package is at least 7 days old | `uv lock --check` | dependency-age |
 | Check every image your branch adds is at least 7 days old (needs Docker with buildx) | `python3 scripts/check-image-age.py --base origin/main` | dependency-age |
-| Check the suppression listing | `sh scripts/check-suppressions.sh` | Suppressions are listed |
-| Check no file has an em or en dash (no output means none) | `git grep -nP '[\x{2013}\x{2014}]'` | No em or en dashes |
-| Scan every file for secrets with the commit-time hook's rules (CI scans the full history) | `pre-commit run --all-files` | Secret scan / Full history |
-| Audit the workflows | `python3 -m venv "${TMPDIR:-/tmp}/zizmor" && "${TMPDIR:-/tmp}/zizmor/bin/pip" install --quiet --require-hashes -r .github/requirements/zizmor.txt && "${TMPDIR:-/tmp}/zizmor/bin/zizmor" --offline .github/workflows` | zizmor |
-| Test the commit policy | `python3 -m unittest discover --start-directory .github/scripts --pattern 'test_*.py'` | Commit policy |
-| Check your commits | `BASE_SHA=$(git merge-base origin/main HEAD) HEAD_SHA=HEAD ALLOWED_COMMIT_IDENTITIES=<your noreply address> python3 .github/scripts/commit_policy.py` | Commit policy |
+| Run every small check (the hooks in `.pre-commit-config.yaml`; CI runs gitleaks as Secret scan / Full history) | `python3 -m venv "${TMPDIR:-/tmp}/checks" && "${TMPDIR:-/tmp}/checks/bin/pip" install --quiet --require-hashes --only-binary :all: -r .github/requirements/pre-commit.txt -r .github/requirements/zizmor.txt && PATH="${TMPDIR:-/tmp}/checks/bin:$PATH" pre-commit run --all-files --hook-stage manual` | Repository checks |
+| Check your commits | `BASE_SHA=$(git merge-base origin/main HEAD) HEAD_SHA=HEAD ALLOWED_COMMIT_IDENTITIES=<your noreply address> python3 .github/scripts/commit_policy.py` | Repository checks |
 | Check the links between the repository's files | `lychee --offline --no-progress './**/*.md'` | Local links |
 
 `-n 0` runs in one process, for example to see print output with `-s`.
@@ -58,7 +54,7 @@ Set up once: install [uv](https://docs.astral.sh/uv/) (it installs the Python in
 | `pyproject.toml`, `uv.lock`, `.python-version` | The project, its exact pins and tool settings, and the one Python version |
 | `scripts/` | The vendored image-age and suppressions checks |
 | `.suppressions` | Every lint suppression, one line each |
-| `.gitleaks.toml`, `.pre-commit-config.yaml` | The secret and leak rules, and the commit-time hook |
+| `.gitleaks.toml`, `.pre-commit-config.yaml` | The secret and leak rules, and the hooks: every small check |
 | `.github/workflows/` | CI and its Gate summary, the secret scan, dependency-age and its re-run, links, CodeQL, Scorecard |
 | `.github/scripts/` | The commit policy check and its tests |
 | `.github/requirements/` | The hash-pinned CI tools |
@@ -92,6 +88,6 @@ Set up once: install [uv](https://docs.astral.sh/uv/) (it installs the Python in
 
 - Follow the standard's [section 6](https://github.com/Vercroft/engineering-practices/blob/main/STANDARD.md#6-git-pull-requests-and-merging).
 - Write a commit subject as a plain sentence of at most 72 characters, with no prefix.
-- The Commit policy check enforces identities, trailers, link hosts and dashes; `.github/scripts/commit_policy.py`
-  says what it allows.
+- The commit policy step of Repository checks enforces identities, trailers, link hosts and dashes;
+  `.github/scripts/commit_policy.py` says what it allows.
 - List every suppression a pull request adds in its description.

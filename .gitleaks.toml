@@ -107,3 +107,18 @@ description = "GitHub App installation token, stateless form (ghs_APPID_JWT)"
 regex = '''(ghs_[0-9]+_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)'''
 secretGroup = 1
 keywords = ["ghs_"]
+
+# The email provider's send token. Its Send Email API page says to send it as
+# "Authorization: Zoho-enczapikey {apiKey}" and documents no prefix, length or alphabet, so the
+# token is found after the header scheme. Burnbird keeps the bare token only in the file named in
+# BURNBIRD_ZOHO_API_KEY_FILE, never in a setting's value, so no rule for an assignment is needed.
+[[rules]]
+id = "zoho-send-mail-token"
+description = "Email provider send token after the Zoho-enczapikey scheme"
+regex = '''Zoho-enczapikey\s+([A-Za-z0-9+/=._-]{20,})'''
+secretGroup = 1
+entropy = 3.5
+keywords = ["zoho-enczapikey"]
+[[rules.allowlists]]
+description = "Documentation placeholders"
+stopwords = ["replace_with", "your_key", "your_value", "apikey"]

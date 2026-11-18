@@ -142,8 +142,9 @@ One pull request:
 - Secrets never go in git.
 - Secrets are read only from files named in the environment: the webhook secret (`BURNBIRD_WEBHOOK_SECRET_FILE`), the
   App's client secret (`BURNBIRD_GITHUB_CLIENT_SECRET_FILE`), the OAuth state key (`BURNBIRD_OAUTH_STATE_KEY_FILE`,
-  32 characters or more), the App's RSA private key in PEM (`BURNBIRD_GITHUB_APP_PRIVATE_KEY_FILE`) and, only where
-  the email provider's webhook is served, its Authentication Key (`BURNBIRD_ZOHO_WEBHOOK_KEY_FILE`). The client ID
+  32 characters or more), the App's RSA private key in PEM (`BURNBIRD_GITHUB_APP_PRIVATE_KEY_FILE`), the email
+  provider's bare send token (`BURNBIRD_ZOHO_API_KEY_FILE`) and, only where the email provider's webhook is served,
+  its Authentication Key (`BURNBIRD_ZOHO_WEBHOOK_KEY_FILE`). The client ID
   (`BURNBIRD_GITHUB_CLIENT_ID`, also the App JWT's issuer) and the site's origin (`BURNBIRD_BASE_URL`,
   `https://<host>` with no path) come from the environment. Tests make random values and keys.
 - Endpoints are plain `def`; `async def` only for a dependency that awaits the request body and makes no blocking call,

@@ -1,4 +1,4 @@
-"""``POST /email/webhook``: the provider reports hard bounces, and the address is paused.
+"""``POST /email/webhook``: the provider reports hard bounces and spam complaints.
 
 The order is fixed, as for GitHub's webhook (``burnbird.github.router``). The app's body limit
 refuses an oversized body while it is read (413); the signature over the raw body is checked
@@ -8,13 +8,22 @@ ignored one too, so the provider has nothing to retry. The route exists only whe
 
 Each item names the email it is about by ``client_reference``, the outbox row's ID. An unknown
 one is ignored: the user may have deleted their data. The provider names the event in
-``event_data[].object``; ``hardbounce`` pauses the address when it is the user's address now,
-and every other event is ignored. What a request does is safe to repeat, since the signature
-does not cover its time: a paused address keeps its first pause.
+``event_data[].object``:
+
+- ``hardbounce`` pauses the address when it is the user's address now;
+- ``fbl_complaint`` (a spam report) does the same, and turns every optional kind of email off,
+  recording each with the source ``complaint``: the person wants no optional mail from us;
+- every other event is ignored.
+
+What a request does is safe to repeat, since the signature does not cover its time: a paused
+address keeps its first pause (a hard bounce replaces a complaint's, since only a new address
+ends it), and a complaint about an email is acted on once (only while no
+``complaint`` consent row exists since the email was sent), so a replay after the user turned
+email on again changes nothing.
 
 Locks, in the lock order (``retention.lock_repositories``): the user rows in ID order, FOR NO KEY
-UPDATE, then the address. The log names the outbox row and the event, never an address or the
-body.
+UPDATE, then each user's address, then their choices. The log names the outbox row and the
+event, never an address or the body.
 """
 
 import logging
@@ -26,17 +35,20 @@ from typing import Annotated, Any, Final
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, ValidationError
-from sqlalchemy import func, literal, select, update
+from sqlalchemy import ColumnElement, func, literal, or_, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
+from burnbird.email.preferences import turn_off_after_complaint
 from burnbird.email.webhook_signature import is_valid
-from burnbird.models import EmailOutbox, GithubUser, UserEmail
+from burnbird.models import EmailConsent, EmailOutbox, GithubUser, UserEmail
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/email")
 
-HARD_BOUNCE: Final = "hardbounce"
+# The events acted on, by the provider's ``event_data[].object``, and the pause each gives.
+PAUSES: Final = {"hardbounce": "hard_bounce", "fbl_complaint": "complaint"}
+COMPLAINT: Final = "fbl_complaint"
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +99,8 @@ class Payload(_Model):
 class _Report:
     outbox_id: uuid.UUID
     user_id: int
+    # When the email was sent (queued, if it never finished): a complaint is acted on once after.
+    sent_at: datetime
     event: str
     addresses: frozenset[str]
 
@@ -148,7 +162,7 @@ def apply(session: Session, payload: Payload, now: datetime) -> None:
         .with_for_update(key_share=True)
     ).all()
     # Read again under that lock: an email deleted meanwhile (Delete my data, a revoke, an
-    # uninstall) is gone, and the user it named may be another account by now.
+    # uninstall) is gone, and the user it named may be deleted, or another account by now.
     present = set(
         session.scalars(
             select(EmailOutbox.id).where(EmailOutbox.id.in_({r.outbox_id for r in reports}))
@@ -158,13 +172,17 @@ def apply(session: Session, payload: Payload, now: datetime) -> None:
         if report.outbox_id not in present:
             logger.info("email webhook: outbox %s is deleted", report.outbox_id)
             continue
-        paused = _pause(session, report, "hard_bounce", now)
         logger.warning("email webhook: %s for outbox %s", report.event, report.outbox_id)
+        if report.event == COMPLAINT and _complained_since(session, report):
+            outcome = "acted on before"
+        else:
+            paused = _pause(session, report, PAUSES[report.event], now)
+            outcome = "paused" if paused else "no pause (already paused, or another address now)"
+            if report.event == COMPLAINT:
+                turned_off = turn_off_after_complaint(session, report.user_id, now)
+                outcome += f"; turned off: {', '.join(turned_off) or 'none'}"
         logger.info(
-            "email webhook: outbox %s, user %d: %s",
-            report.outbox_id,
-            report.user_id,
-            "paused" if paused else "no pause (already paused, or another address now)",
+            "email webhook: outbox %s, user %d: %s", report.outbox_id, report.user_id, outcome
         )
 
 
@@ -173,17 +191,22 @@ def _reports(session: Session, payload: Payload) -> list[_Report]:
     reports = []
     for message in payload.event_message:
         reference = _uuid(message.email_info.client_reference)
-        user_id = (
+        row = (
             None
             if reference is None
-            else session.scalar(select(EmailOutbox.user_id).where(EmailOutbox.id == reference))
+            else session.execute(
+                select(
+                    EmailOutbox.user_id,
+                    func.coalesce(EmailOutbox.finished_at, EmailOutbox.created_at),
+                ).where(EmailOutbox.id == reference)
+            ).first()
         )
         for data in message.event_data:
-            if reference is None or user_id is None or data.object != HARD_BOUNCE:
+            if reference is None or row is None or data.object not in PAUSES:
                 logger.info("email webhook: %s ignored (outbox %s)", data.object, reference)
                 continue
-            addresses = _addresses(data.details, "bounced_recipient")
-            reports.append(_Report(reference, user_id, data.object, addresses))
+            addresses = _addresses(data.details, "bounced_recipient", "fblFrom")
+            reports.append(_Report(reference, row[0], row[1], data.object, addresses))
     return reports
 
 
@@ -200,12 +223,19 @@ def _addresses(details: Any, *names: str) -> frozenset[str]:
 
 
 def _pause(session: Session, report: _Report, reason: str, now: datetime) -> bool:
-    """Pause the user's address if it is one the report names and is not paused yet."""
+    """Pause the user's address if it is one the report names and is not paused yet.
+
+    A hard bounce replaces a complaint's pause: the switch lifts a complaint's, and only a new
+    address may end a bounce's.
+    """
+    replaceable: ColumnElement[bool] = UserEmail.suppressed_at.is_(None)
+    if reason == "hard_bounce":
+        replaceable = or_(replaceable, UserEmail.suppressed_reason == "complaint")
     paused = session.execute(
         update(UserEmail)
         .where(
             UserEmail.user_id == report.user_id,
-            UserEmail.suppressed_at.is_(None),
+            replaceable,
             # Both sides lower-cased by the database, so they agree on every character.
             func.lower(UserEmail.address).in_(
                 [func.lower(literal(address)) for address in report.addresses]
@@ -215,6 +245,22 @@ def _pause(session: Session, report: _Report, reason: str, now: datetime) -> boo
         .returning(UserEmail.user_id)
     ).first()
     return paused is not None
+
+
+def _complained_since(session: Session, report: _Report) -> bool:
+    """Return whether a complaint was already acted on for the user since this email was sent."""
+    return (
+        session.scalar(
+            select(EmailConsent.id)
+            .where(
+                EmailConsent.user_id == report.user_id,
+                EmailConsent.source == "complaint",
+                EmailConsent.at >= report.sent_at,
+            )
+            .limit(1)
+        )
+        is not None
+    )
 
 
 def _uuid(value: Any) -> uuid.UUID | None:

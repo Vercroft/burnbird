@@ -25,6 +25,7 @@ from sqlalchemy import Connection, Engine, delete, event, insert, select, text, 
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird import retention
+from burnbird.account.service import save_warnings
 from burnbird.auth.service import ListedRepository, SignIn, session_digest, store_sign_in
 from burnbird.email import outbox, unsubscribe, webhook
 from burnbird.email.outbox import Mail
@@ -35,6 +36,7 @@ from burnbird.github.events import HANDLERS, process_next, store_job
 from burnbird.models import (
     Account,
     Backfill,
+    EmailConsent,
     EmailOutbox,
     EmailPreference,
     GithubUser,
@@ -1455,4 +1457,125 @@ def test_a_report_held_up_while_the_user_deletes_and_returns_acts_on_nothing(
     )
 
     with Session(engine) as check:
+        assert check.get_one(UserEmail, user_id).suppressed_at is None
+
+
+@pytest.mark.parametrize(
+    "remove",
+    [retention.delete_my_data, retention.revoke_authorization],
+    ids=["delete my data", "revoke"],
+)
+@pytest.mark.parametrize("first", ["complaint", "deletion"])
+def test_a_complaint_and_a_user_s_deletion(
+    engine: Engine, cleanup: list[int], remove: Callable[[Session, int], object], first: str
+) -> None:
+    # Both take the user row first. The complaint paused after it holds the row; the deletion
+    # paused after it deleted the outbox rows, so the complaint has read its row and then finds
+    # the user gone, and writes nothing for them.
+    user_id = 8133
+    cleanup.append(user_id)
+    row_id = _recipient(engine, user_id)
+    complaint = _reports("fbl_complaint", row_id, _address_of(user_id))
+    deletion = _transaction(lambda session: remove(session, user_id))
+
+    if first == "complaint":
+        _race(engine, complaint, "UPDATE user_email", deletion)
+    else:
+        _race(engine, deletion, "DELETE FROM user_email", complaint)
+
+    with Session(engine) as check:
+        assert check.get(GithubUser, user_id) is None
+
+
+def test_a_complaint_about_an_old_address_and_delete_my_data(
+    engine: Engine, cleanup: list[int]
+) -> None:
+    # The address no longer matches, so the complaint pauses nothing and holds no address row,
+    # the row that would otherwise make Delete my data wait. The complaint turns the kinds off in
+    # their own order (usage_warnings, weekly_summary, news) and is paused before news, holding
+    # the other two. Delete my data deletes the choices in one statement, in the table's or the
+    # index's order: news first here either way (stored first, and first by its key). Without the
+    # complaint's user-row lock, Delete my data would take news and wait for usage_warnings while
+    # the complaint waits for news: a deadlock. With it, Delete my data waits at the user row.
+    user_id = 8134
+    cleanup.append(user_id)
+    row_id = _recipient(engine, user_id)
+    with engine.begin() as connection:
+        connection.execute(delete(EmailPreference).where(EmailPreference.user_id == user_id))
+        for kind in ("news", "weekly_summary", "usage_warnings"):
+            connection.execute(
+                insert(EmailPreference).values(
+                    user_id=user_id, kind=kind, enabled=True, updated_at=NOW
+                )
+            )
+
+    _race(
+        engine,
+        _reports("fbl_complaint", row_id, "older" + "@" + "example.invalid"),
+        lambda statement, parameters: (
+            statement.startswith("SELECT email_preference") and "news" in str(parameters)
+        ),
+        _delete_my_data(user_id),
+    )
+
+    with Session(engine) as check:
+        assert check.get(GithubUser, user_id) is None
+
+
+def test_a_complaint_and_an_unsubscribe(engine: Engine, cleanup: list[int]) -> None:
+    # The unsubscribe holds the warnings choice and is paused before its consent row; the
+    # complaint takes the user row and the address, waits for the choice, then records its own.
+    user_id = 8135
+    cleanup.append(user_id)
+    row_id = _recipient(engine, user_id)
+    token = secrets.token_urlsafe(32)
+    with engine.begin() as connection:
+        connection.execute(
+            update(EmailOutbox)
+            .where(EmailOutbox.id == row_id)
+            .values(
+                state="sent",
+                finished_at=NOW,
+                retry_at=None,
+                unsubscribe_sha256=hashlib.sha256(token.encode()).digest(),
+            )
+        )
+
+    _race(
+        engine,
+        _transaction(lambda session: unsubscribe.turn_off(session, token, NOW)),
+        "INSERT INTO email_consent",
+        _reports("fbl_complaint", row_id, _address_of(user_id)),
+    )
+
+    with Session(engine) as check:
+        sources = check.scalars(
+            select(EmailConsent.source)
+            .where(EmailConsent.user_id == user_id, EmailConsent.kind == "usage_warnings")
+            .order_by(EmailConsent.id)
+        ).all()
+        assert sources[-2:] == ["one_click", "complaint"]
+        assert check.get_one(UserEmail, user_id).suppressed_reason == "complaint"
+
+
+def test_a_complaint_and_the_switch_turned_on(engine: Engine, cleanup: list[int]) -> None:
+    # The complaint holds the user row and the address and is paused before the choices; the
+    # switch's save waits at the user row, then turns warnings on and lifts the complaint's pause.
+    user_id = 8136
+    cleanup.append(user_id)
+    row_id = _recipient(engine, user_id)
+    with engine.begin() as connection:
+        connection.execute(
+            update(EmailPreference).where(EmailPreference.user_id == user_id).values(enabled=False)
+        )
+
+    _race(
+        engine,
+        _reports("fbl_complaint", row_id, _address_of(user_id)),
+        "SELECT email_preference",
+        _transaction(lambda session: save_warnings(session, user_id, True, NOW)),
+    )
+
+    with Session(engine) as check:
+        assert check.get_one(EmailPreference, (user_id, "usage_warnings")).enabled is True
         assert check.get_one(UserEmail, user_id).suppressed_at is None

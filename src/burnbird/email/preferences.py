@@ -13,7 +13,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from burnbird.email.consent import TEXT_VERSION
-from burnbird.models import EmailConsent, EmailPreference
+from burnbird.models import EMAIL_KINDS, EmailConsent, EmailPreference
 
 # Run-out warnings are on unless turned off; the weekly summary and news only if asked for.
 # One entry per kind in ``models.EMAIL_KINDS`` (a test checks they agree).
@@ -70,6 +70,22 @@ def set_choice(
     current.updated_at = now
     _record(session, user_id, kind, enabled, source, now)
     return True
+
+
+def turn_off_after_complaint(session: Session, user_id: int, now: datetime) -> list[str]:
+    """Turn every optional kind off after a spam complaint; return the kinds that changed.
+
+    Each kind gets a consent row with the source ``complaint``, one already off too: the report is
+    the person's own statement, and the row marks the complaint as acted on
+    (``burnbird.email.webhook``).
+    """
+    changed = []
+    for kind in EMAIL_KINDS:
+        if set_choice(session, user_id, kind, False, now, source="complaint"):
+            changed.append(kind)
+        else:
+            _record(session, user_id, kind, False, "complaint", now)
+    return changed
 
 
 def _record(

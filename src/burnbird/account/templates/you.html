@@ -12,6 +12,8 @@
 {% endif %}
 {% if data.paused_reason == "hard_bounce" %}
 <p>Email paused: your address bounced on {{ paused_on }}. To resume, make a working address your primary email on GitHub and sign in again, or write to hello@burnbird.racingcrow.com.</p>
+{% elif data.paused_reason == "complaint" %}
+<p>Email off: it was reported as spam on {{ paused_on }}.</p>
 {% endif %}
 {% if off_by_link %}
 <p>Run-out warnings: off, turned off by the email link on {{ off_by_link }}. Turn them on again with the switch below.</p>

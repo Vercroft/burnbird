@@ -81,6 +81,14 @@ of its own.
   (`tests/email/test_preferences.py::test_defaults_never_reset_a_choice_the_user_made`).
 - A changed `email/consent.txt` is a new version by itself
   (`tests/email/test_consent.py::test_the_version_is_the_start_of_the_wording_s_sha256`).
+- The email webhook and the warnings switch lock the user row first, then the address, then the choices
+  (`tests/test_lock_order.py::test_a_complaint_and_the_switch_turned_on`,
+  `tests/test_lock_order.py::test_a_complaint_about_an_old_address_and_delete_my_data`).
+- A complaint about an email acts once: a replay changes nothing, even after the user turned warnings on again
+  (`tests/email/test_webhook.py::test_a_replayed_complaint_after_the_user_turned_warnings_on_changes_nothing`).
+- Turning warnings on with the switch lifts a complaint's pause, never a bounce's
+  (`tests/account/test_you.py::test_turning_warnings_on_after_a_complaint_lifts_its_pause`,
+  `tests/account/test_you.py::test_turning_warnings_on_never_lifts_a_bounce`).
 - An email address never reaches a log line, an exception or a test's committed text
   (`tests/auth/test_email.py::test_the_address_never_reaches_a_log`, `tests/test_logs.py`).
 

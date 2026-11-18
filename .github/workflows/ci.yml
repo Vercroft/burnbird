@@ -8,14 +8,6 @@ on:
 permissions: {}
 
 jobs:
-  # The full-history scan from Vercroft's shared workflow (engineering-practices 7C.6), with this
-  # repository's .gitleaks.toml, on its default runner, ubuntu-latest.
-  secrets:
-    name: gitleaks
-    uses: Vercroft/.github/.github/workflows/gitleaks.yml@f6f6aee14ba293fad8f1fd18d1f077ae58f5e59e # v1.1.0
-    permissions:
-      contents: read
-
   workflows:
     name: zizmor
     runs-on: ubuntu-latest

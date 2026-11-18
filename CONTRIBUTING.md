@@ -21,9 +21,9 @@ Set up once: install [uv](https://docs.astral.sh/uv/) (it installs the Python in
 | Check formatting | `uv run --locked ruff format --check` | Python |
 | Lint | `uv run --locked ruff check` | Python |
 | Check types | `uv run --locked mypy` | Python |
-| Check the Python version agrees everywhere | `uv run --locked pytest tests/test_python_version.py` | Python |
-| Run the full tests | `uv run --locked pytest` | Python |
-| Run one test file | `uv run --locked pytest tests/test_package.py` | none |
+| Check the Python version agrees everywhere | `uv run --locked pytest -n 0 tests/test_python_version.py` | Python |
+| Run the full tests (in parallel, one worker per CPU) | `uv run --locked pytest` | Python |
+| Run one test file | `uv run --locked pytest -n 0 tests/test_package.py` | none |
 | Check every locked package is at least 7 days old | `uv lock --check` | dependency-age |
 | Check every image your branch adds is at least 7 days old (needs Docker with buildx) | `python3 scripts/check-image-age.py --base origin/main` | dependency-age |
 | Check the suppression listing | `sh scripts/check-suppressions.sh` | Suppressions are listed |
@@ -33,6 +33,8 @@ Set up once: install [uv](https://docs.astral.sh/uv/) (it installs the Python in
 | Test the commit policy | `python3 -m unittest discover --start-directory .github/scripts --pattern 'test_*.py'` | Commit policy |
 | Check your commits | `BASE_SHA=$(git merge-base origin/main HEAD) HEAD_SHA=HEAD ALLOWED_COMMIT_IDENTITIES=<your noreply address> python3 .github/scripts/commit_policy.py` | Commit policy |
 | Check the links between the repository's files | `lychee --offline --no-progress './**/*.md'` | Local links |
+
+`-n 0` runs in one process, for example to see print output with `-s`.
 
 `Gate summary` passes only when every CI job passed or was skipped; it is the CI check the ruleset requires.
 

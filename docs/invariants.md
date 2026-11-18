@@ -97,8 +97,8 @@ of its own.
 - The site's origin (`BURNBIRD_BASE_URL`) is `https://<host>` with no path, and the client ID
   (`BURNBIRD_GITHUB_CLIENT_ID`) is also the App JWT's issuer; both come from the environment
   (`tests/auth/test_config.py`).
-- The database URL comes only from the environment, never from a file; the tests refuse any database not named
-  `burnbird_test` (`tests/conftest.py`).
+- The database URL comes only from the environment, never from a file. The tests use only `burnbird_test`, or
+  `burnbird_test_gw<number>` made for one pytest-xdist worker and dropped after it (`tests/test_database_guard.py`).
 
 ## Repository
 

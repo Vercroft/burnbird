@@ -79,6 +79,9 @@ docker stop burnbird-test-mailpit
 | Check the suppression listing | the `Suppressions are listed` step of `.github/workflows/ci.yml` | Suppressions are listed |
 | Check no file has an em or en dash (no output means none) | `git grep -nP '[\x{2013}\x{2014}]'` | No em or en dashes |
 
+`Gate summary` passes only when every CI job above passed or was skipped (Commit policy is skipped on a push to
+main); it is the CI check the ruleset requires, and `tests/test_gate_summary.py` keeps it judging every job.
+
 The commit policy allows only approved people as author, committer and co-author (the organisation variable
 `ALLOWED_COMMIT_IDENTITIES`), only the trailer keys listed at the top of `.github/scripts/commit_policy.py`, only
 links to the hosts in the `url-host` rule's placeholder and reviewed public lists in `.gitleaks.toml`, and no em or en dash in commit
@@ -120,7 +123,7 @@ messages, the pull request title or its description. Its output names only the c
 | `SECURITY.md` | How to report a vulnerability |
 | `.gitleaks.toml`, `.pre-commit-config.yaml` | The leak patterns and the commit-time hook; the `url-host` rule's last list holds the reviewed hosts only this repository cites |
 | `.github/CODEOWNERS` | Who reviews every change |
-| `.github/workflows/` | CI (Python with its Postgres and Mailpit services, zizmor, suppressions, commit policy, no dashes), the secret scan (Vercroft's shared workflow), dependency-age (packages and images) and its daily re-run for Dependabot pull requests, links, CodeQL and Scorecard |
+| `.github/workflows/` | CI (Python with its Postgres and Mailpit services, zizmor, suppressions, commit policy, no dashes, and the Gate summary that needs them all), the secret scan (Vercroft's shared workflow), dependency-age (packages and images) and its daily re-run for Dependabot pull requests, links, CodeQL and Scorecard |
 | `.github/scripts/` | The commit policy check and its tests |
 | `.github/requirements/` | Hash-pinned CI tools (zizmor) |
 | `.github/dependabot.yml` | Monthly grouped updates for the Python packages, the actions, the workflow images and the CI tools; `tests/test_images.py` checks the images are pinned and Postgres majors are held |

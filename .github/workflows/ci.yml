@@ -152,3 +152,30 @@ jobs:
             echo "Use a hyphen, a colon or a new sentence instead of the dashes above." >&2
             exit 1
           fi
+
+  # The one CI check the ruleset requires, so a job here can be renamed without a ruleset change.
+  # `if: always()` so a failed job cannot skip it; it fails unless every job it needs passed or was
+  # skipped. Only Commit policy is ever skipped: it runs on pull requests only, so on a push to main
+  # it is skipped and counts as passed. tests/test_gate_summary.py fails when a job in this file is
+  # missing from `needs`, when the verdict accepts a failure, or when another job gets an `if:`.
+  gate-summary:
+    name: Gate summary
+    if: always()
+    needs: [workflows, python, suppressions, commit-policy, dashes]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require every needed job to have passed or been skipped
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          results = {job: need["result"] for job, need in json.loads(os.environ["NEEDS_JSON"]).items()}
+          for job, result in sorted(results.items()):
+              print(f"{job}: {result}")
+          bad = sorted(f"{job}={result}" for job, result in results.items() if result not in ("success", "skipped"))
+          if not results or bad:
+              sys.exit("not every needed job passed or was skipped: " + (", ".join(bad) or "no jobs"))
+          PY

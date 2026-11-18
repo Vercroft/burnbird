@@ -8,7 +8,7 @@ found=$(mktemp)
 trap 'rm -f "$found"' EXIT
 
 git ls-files -z -- '*.py' '*.pyi' '*.ts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*.cjs' '*.mts' '*.cts' \
-  '*.astro' '*.vue' '*.svelte' '*.rs' '*.go' | xargs -0 -r perl -e '
+  '*.astro' '*.vue' '*.svelte' '*.rs' '*.go' '*.yml' '*.yaml' | xargs -0 -r perl -e '
 my $bad = 0;
 my $why = qr/\S.{9,}/;    # the reason: 10 or more characters
 sub refuse { my ($p, $n, $c) = @_; warn "$p:$n: refused: $c\n"; $bad = 1 }
@@ -46,7 +46,13 @@ for my $p (@ARGV) {
   my $n = 0;
   for my $line (split /\n/, $text) {
     $n++;
-    if ($p =~ /\.pyi?$/) {
+    if ($p =~ /\.ya?ml$/) {
+      next unless $line =~ /(#\s*zizmor\s*:.*)$/;
+      my $c = $1;
+      if ($c =~ /^#\s*zizmor:\s*ignore\[[a-z0-9-]+\]\s+#\s+$why$/) {
+        print "$p: $c\n";
+      } else { refuse($p, $n, $c) }
+    } elsif ($p =~ /\.pyi?$/) {
       next unless $line =~ /(#\s*(?:noqa|ruff\s*:|type\s*:\s*ignore|mypy\s*:|pyright\s*:).*)$/;
       my $c = $1;
       if ($c =~ /^#\s*noqa:\s*[A-Z]+[0-9]+\s+#\s+$why$/ || $c =~ /^#\s*type:\s*ignore\[[a-z-]+\]\s+#\s+$why$/) {

@@ -30,7 +30,9 @@ of its own.
 ## Requests and pages
 
 - Endpoints are plain `def`. `async def` is only for a dependency that awaits the body and makes no blocking call, and
-  for `/auth/login` and `/auth/callback`, whose database work runs in the thread pool.
+  for `/auth/login` and `/auth/callback`, whose database work runs in the thread pool (a blocking standard-library
+  call in an `async def`: ruff's `ASYNC` rules in `uv run --locked ruff check`; the rest checked in review, standard
+  §4.3).
 - Every POST depends on `csrf_protected`: the exact site `Origin` and the session's `csrf_token`
   (`tests/auth/test_csrf.py`).
 - Only the POSTs listed with their reason in `tests/test_csrf_boundary.py` are exempt; a new exemption is a reviewed
@@ -96,8 +98,8 @@ of its own.
 - A schema change is a new migration, never an edit to a merged one
   (`tests/test_migration.py::test_the_models_match_the_migrated_schema`).
 - Every workflow image is pinned as `name:tag@sha256:<digest>`, written once and classified (`tests/test_images.py`).
-- Every action is pinned by full commit SHA with its release in a comment, at least 7 days old (Dependabot's
-  cooldown).
+- Every action is pinned by full commit SHA (zizmor's `unpinned-uses` audit, the zizmor job), with its release in a
+  comment and at least 7 days old (checked in review, standard §4.3).
 - Python packages are pinned exactly and locked; uv refuses versions under 7 days old and source builds
   (`uv lock --check`, the dependency-age job).
 - A suppression names one rule with a reason and is listed in `.suppressions` (`scripts/check-suppressions.sh`).

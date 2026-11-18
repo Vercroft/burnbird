@@ -17,7 +17,7 @@ RECORDED = {
     ),
     # The check script of the standard's docs/suppressions.md, copied from its code block.
     "scripts/check-suppressions.sh": (
-        "aca6fd6eaa9b8109d5795e3333a3a0fa43575efa39ff363af9ee15c9c03cd95b"
+        "a7856f9f7ebdf38ea133f93adaa535d1ddd9f11d0c53695f4791268eb627faf4"
     ),
 }
 

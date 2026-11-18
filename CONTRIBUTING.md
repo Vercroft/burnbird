@@ -40,9 +40,7 @@ Set up once: install [uv](https://docs.astral.sh/uv/) (it installs the Python in
 
 | Path | Holds |
 |---|---|
-| `README.md` | What Burnbird is |
 | `PRIVACY.md` | What Burnbird stores about people, why, who handles it, how long, and their rights |
-| `SECURITY.md` | How to report a vulnerability |
 | `LICENSE` | The licence, Fair Source (FSL-1.1-MIT) |
 | `src/burnbird/` | The application: one folder per feature, shared storage at the root; each module's docstring says what it does |
 | `src/burnbird/account/` | The signed-in user's own data: the "Your data" page, the email switch, Delete my data |
@@ -63,7 +61,6 @@ Set up once: install [uv](https://docs.astral.sh/uv/) (it installs the Python in
 | `.github/scripts/` | The commit policy check and its tests |
 | `.github/requirements/` | The hash-pinned CI tools |
 | `.github/dependabot.yml` | The monthly grouped updates |
-| `.github/CODEOWNERS` | Who reviews every change |
 
 ## Boundaries
 
@@ -81,7 +78,7 @@ Set up once: install [uv](https://docs.astral.sh/uv/) (it installs the Python in
 - Never add a CSRF exemption without review: [invariants, requests](docs/invariants.md#requests-and-pages).
 - Never lock several repositories outside `retention.lock_repositories`:
   [invariants, stored data](docs/invariants.md#stored-data-and-deletion).
-- Update `PRIVACY.md` in the same pull request as any change that stores something new about people.
+- Never store something new about people without updating `PRIVACY.md` in the same pull request.
 
 ## Done means
 

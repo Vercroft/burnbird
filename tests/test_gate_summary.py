@@ -22,8 +22,8 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 GATE = "gate-summary"
-# The only jobs with a condition: Commit policy runs on pull requests only, and the gate always.
-CONDITIONS = {"commit-policy": "github.event_name == 'pull_request'", GATE: "always()"}
+# The only job with a condition: the gate, always.
+CONDITIONS = {GATE: "always()"}
 
 JOB = re.compile(r"^  ([a-z][a-z0-9_-]*):\n", re.MULTILINE)
 VERDICT = re.compile(r"<<'PY'\n(.*?)\n *PY\n", re.DOTALL)
@@ -79,7 +79,7 @@ def test_the_gate_needs_every_other_job() -> None:
     assert not missing, f"`{GATE}` does not need {missing}, so nothing requires them to pass"
 
 
-def test_only_commit_policy_and_the_gate_have_a_condition() -> None:
+def test_only_the_gate_has_a_condition() -> None:
     conditions = {job: _field(block, "if") for job, block in _jobs().items()}
     assert {job: c for job, c in conditions.items() if c is not None} == CONDITIONS
 
@@ -97,5 +97,5 @@ def test_the_gate_fails_when_it_judges_no_job() -> None:
 
 def test_the_gate_passes_when_every_job_passed_or_was_skipped() -> None:
     results = dict.fromkeys(_needs(), "success")
-    results["commit-policy"] = "skipped"
+    results["repository-checks"] = "skipped"
     assert _verdict(results) == 0

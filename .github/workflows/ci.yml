@@ -8,8 +8,10 @@ on:
 permissions: {}
 
 jobs:
-  workflows:
-    name: zizmor
+  # Runs every hook in .pre-commit-config.yaml (engineering-practices docs/required-checks.md); a new small check
+  # is a new hook there. A check that reads the pull request, not the files, is a step after the hooks.
+  repository-checks:
+    name: Repository checks
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -17,12 +19,34 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The commit policy reads every commit of the pull request.
+          fetch-depth: 0
           persist-credentials: false
-      - name: Audit the workflows
+      # Only runs the tools: pinned to a version every pinned package has a wheel for.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14.10"
+      # gitleaks scans staged changes, and CI has none; the Secret scan check scans the full history.
+      - name: Run every hook
+        env:
+          SKIP: gitleaks
         run: |
-          python3 -m venv "$RUNNER_TEMP/venv"
-          "$RUNNER_TEMP/venv/bin/pip" install --quiet --require-hashes -r .github/requirements/zizmor.txt
-          "$RUNNER_TEMP/venv/bin/zizmor" --offline .github/workflows
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet --require-hashes --only-binary :all: \
+            -r .github/requirements/pre-commit.txt -r .github/requirements/zizmor.txt
+          export PATH="$RUNNER_TEMP/venv/bin:$PATH"
+          pre-commit run --all-files --hook-stage manual --show-diff-on-failure
+      # The approved people are listed in the organisation variable ALLOWED_COMMIT_IDENTITIES.
+      - name: Check the commits, the title and the description
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          ALLOWED_COMMIT_IDENTITIES: ${{ vars.ALLOWED_COMMIT_IDENTITIES }}
+        run: python3 .github/scripts/commit_policy.py
 
   python:
     name: Python
@@ -88,71 +112,14 @@ jobs:
       - name: Tests
         run: uv run --locked pytest
 
-  suppressions:
-    name: Suppressions are listed
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Compare the suppressions in the code with .suppressions
-        run: sh scripts/check-suppressions.sh
-
-  commit-policy:
-    name: Commit policy
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Test the checker
-        run: python3 -m unittest discover --start-directory .github/scripts --pattern 'test_*.py'
-      # The approved people are listed in the organisation variable ALLOWED_COMMIT_IDENTITIES.
-      - name: Check the commits, the title and the description
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-          ALLOWED_COMMIT_IDENTITIES: ${{ vars.ALLOWED_COMMIT_IDENTITIES }}
-        run: python3 .github/scripts/commit_policy.py
-
-  # No em or en dash in any tracked file. Nothing is exempt.
-  dashes:
-    name: No em or en dashes
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Find em and en dashes
-        run: |
-          if git grep -nP '[\x{2013}\x{2014}]'; then
-            echo "Use a hyphen, a colon or a new sentence instead of the dashes above." >&2
-            exit 1
-          fi
-
   # The one CI check the ruleset requires, so a job here can be renamed without a ruleset change.
   # `if: always()` so a failed job cannot skip it; it fails unless every job it needs passed or was
-  # skipped. Only Commit policy is ever skipped: it runs on pull requests only, so on a push to main
-  # it is skipped and counts as passed. tests/test_gate_summary.py fails when a job in this file is
-  # missing from `needs`, when the verdict accepts a failure, or when another job gets an `if:`.
+  # skipped. tests/test_gate_summary.py fails when a job in this file is missing from `needs`, when
+  # the verdict accepts a failure, or when another job gets an `if:`.
   gate-summary:
     name: Gate summary
     if: always()
-    needs: [workflows, python, suppressions, commit-policy, dashes]
+    needs: [repository-checks, python]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}

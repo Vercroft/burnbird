@@ -106,8 +106,8 @@ of its own.
 - A schema change is a new migration, never an edit to a merged one
   (`tests/test_migration.py::test_the_models_match_the_migrated_schema`).
 - Every workflow image is pinned as `name:tag@sha256:<digest>`, written once and classified (`tests/test_images.py`).
-- Every action is pinned by full commit SHA (zizmor's `unpinned-uses` audit, the zizmor job), with its release in a
-  comment and at least 7 days old (checked in review, standard §4.3).
+- Every action is pinned by full commit SHA (zizmor's `unpinned-uses` audit, a hook that Repository checks runs), with
+  its release in a comment and at least 7 days old (checked in review, standard §4.3).
 - Python packages are pinned exactly and locked; uv refuses versions under 7 days old and source builds
   (`uv lock --check`, the dependency-age job).
 - A suppression names one rule with a reason and is listed in `.suppressions` (`scripts/check-suppressions.sh`).

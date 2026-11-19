@@ -12,9 +12,13 @@ so an email exists only if that decision commits. A second decision for the same
 2. **Send transaction.** ``send`` locks the ``email-send`` task row, so sends are one at a time
    across workers and the caps cannot be raced, then the outbox row, and goes on only while the
    lease is still its own. The address is read without a lock. It checks, in order: expiry, the
-   address, its suppression, the user's choice (usage email only), the user's access to the
-   account, then the per-recipient and global caps. A row that fails a check is ``skipped`` with
-   the reason; one at a cap waits, queued, for the window to free. Otherwise it renders the email
+   address, its freshness (one a sign-in has not read within ``retention.EMAIL_FRESHNESS`` is
+   ``stale_address``, as the daily purge would delete it), its suppression, the user's choice
+   (usage email only), the user's access to the account, then the per-recipient and global caps,
+   and only then a run-out warning's state (``burnbird.email.run_out``), so a row that waits at a
+   cap reads no jobs. A row that fails a check is ``skipped`` with the reason; one at a cap waits,
+   queued, for the window to free; one whose params are not a run-out warning's fails. Otherwise
+   it renders the email
    and makes the one POST while the outbox row stays locked: Delete my data, a revoke or an
    uninstall, which delete outbox rows first, wait for it, and nothing is sent after they commit.
    The sender's timeouts bound that wait.
@@ -51,9 +55,11 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird.auth.dependencies import account_access
+from burnbird.email import run_out
 from burnbird.email.message import compose, unsubscribe_url
 from burnbird.email.sender import Result, Sender
 from burnbird.models import EmailOutbox, EmailPreference, Installation, UserEmail, WorkerTask
+from burnbird.retention import EMAIL_FRESHNESS
 from burnbird.templates import ENVIRONMENT
 
 logger = logging.getLogger(__name__)
@@ -195,16 +201,26 @@ def send(sessions: sessionmaker[Session], mail: Mail, claimed: Claimed, now: dat
         try:
             address = _checked_address(session, row, now)
         except _SkippedError as skip:
-            _finish(row, "skipped", skip.reason, now)
-            logger.info("email: %s skipped (%s), user %d", row.id, skip.reason, row.user_id)
+            _skip(row, skip.reason, now)
             return
         if wait := _cap_wait(session, row, now):
             _put_back(row, wait)
             _CAP_ERRORS.log(session)
             return
+        if row.template == run_out.TEMPLATE:
+            try:
+                run_out.checked(session, row, now)
+            except run_out.SkippedError as skip:
+                _skip(row, skip.reason, now)
+                return
+            except run_out.InvalidParamsError:
+                # Wrong params stay wrong: fail the email rather than try it every lease.
+                logger.exception("email: %s has params it cannot be sent with", row.id)
+                _finish(row, "failed", "params", now)
+                return
         token = secrets.token_urlsafe(32) if row.kind == "usage_warnings" else None
         try:
-            message = _render(mail, row, address, token)
+            message = _render(mail, row, address, token, _context(row))
         except Exception:
             # A broken template stays broken: fail the email rather than try it every lease.
             logger.exception("email: %s could not be rendered, user %d", row.id, row.user_id)
@@ -252,10 +268,15 @@ def _checked_address(session: Session, row: EmailOutbox, now: datetime) -> str:
     if now >= row.expires_at:
         raise _SkippedError("expired")
     email = session.execute(
-        select(UserEmail.address, UserEmail.suppressed_at).where(UserEmail.user_id == row.user_id)
+        select(UserEmail.address, UserEmail.read_at, UserEmail.suppressed_at).where(
+            UserEmail.user_id == row.user_id
+        )
     ).first()
     if email is None:
         raise _SkippedError("no_address")
+    # The daily purge's own rule (``retention``): until it runs, the address is not mailed.
+    if email.read_at < now - EMAIL_FRESHNESS:
+        raise _SkippedError("stale_address")
     if email.suppressed_at is not None:
         raise _SkippedError("suppressed")
     if row.kind == "usage_warnings" and not session.scalar(
@@ -292,17 +313,29 @@ def _cap_wait(session: Session, row: EmailOutbox, now: datetime) -> datetime | N
     return max(waits, default=None)
 
 
-def _render(mail: Mail, row: EmailOutbox, address: str, token: str | None) -> Any:
+def _skip(row: EmailOutbox, reason: str, now: datetime) -> None:
+    _finish(row, "skipped", reason, now)
+    logger.info("email: %s skipped (%s), user %d", row.id, reason, row.user_id)
+
+
+def _context(row: EmailOutbox) -> dict[str, Any]:
+    """Return the values the email's templates use, read at send."""
+    return dict(row.params)
+
+
+def _render(
+    mail: Mail, row: EmailOutbox, address: str, token: str | None, context: Mapping[str, Any]
+) -> Any:
     environment = mail.environment
     return compose(
         reference=row.id,
         to=address,
         subject=environment.get_template(f"email/{row.template}.subject.txt")
-        .render(row.params)
+        .render(context)
         .strip(),
         html=environment.get_template(f"email/{row.template}.html"),
         text=environment.get_template(f"email/{row.template}.txt"),
-        context=row.params,
+        context=context,
         origin=mail.origin,
         unsubscribe_url=None if token is None else unsubscribe_url(mail.origin, token),
     )

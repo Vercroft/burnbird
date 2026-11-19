@@ -2,12 +2,15 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from jinja2 import ChoiceLoader, DictLoader, Environment, Template
 
 from burnbird.email.message import Message
 from burnbird.email.sender import Result
+from burnbird.models import Job
 from burnbird.templates import ENVIRONMENT
 
 
@@ -38,23 +41,55 @@ def example_templates() -> tuple[Template, Template]:
 
 
 def example_environment() -> Environment:
-    """The environment with an example ``run_out_warning`` email, until the real one exists."""
+    """The environment with an example ``run_out_warning`` email, for tests of the sending."""
     assert ENVIRONMENT.loader is not None
     return ENVIRONMENT.overlay(
         loader=ChoiceLoader(
             [
                 DictLoader(
                     {
-                        "email/run_out_warning.subject.txt": "Example warning for {{ account }}",
+                        "email/run_out_warning.subject.txt": "Example {{ kind }} warning",
                         "email/run_out_warning.txt": "{% extends 'email/layout.txt' %}"
-                        "{% block body %}Example warning for {{ account }}{% endblock %}",
+                        "{% block body %}Example {{ kind }} warning{% endblock %}",
                         "email/run_out_warning.html": "{% extends 'email/layout.html' %}"
-                        "{% block body %}<p>Example warning for {{ account }}</p>{% endblock %}",
+                        "{% block body %}<p>Example {{ kind }} warning</p>{% endblock %}",
                     }
                 ),
                 ENVIRONMENT.loader,
             ]
         )
+    )
+
+
+def example_params(now: datetime, kind: str = "used-75") -> dict[str, Any]:
+    """A Blacksmith run-out warning's params for the cycle that holds ``now`` (cycle day 1)."""
+    return {
+        "provider": "blacksmith",
+        "kind": kind,
+        "cycle_start": now.date().replace(day=1).isoformat(),
+        "repository_id": None,
+        "runner_class": None,
+    }
+
+
+def example_usage(job_id: int, repository_id: int, at: datetime, minutes: int = 2400) -> Job:
+    """A Blacksmith job of ``minutes`` completed at ``at``: 2,400 is 80% of the free 3,000.
+
+    So a used-75 warning for its account is still true at send.
+    """
+    return Job(
+        id=job_id,
+        run_attempt=1,
+        run_id=job_id,
+        repository_id=repository_id,
+        labels=["blacksmith-2vcpu-ubuntu-2404"],
+        created_at=at - timedelta(minutes=minutes),
+        started_at=at - timedelta(minutes=minutes),
+        completed_at=at,
+        provider="blacksmith",
+        runner_class="linux-x64-2vcpu",
+        billed_minutes=Decimal(minutes),
+        amount=Decimal(minutes),
     )
 
 

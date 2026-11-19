@@ -14,9 +14,24 @@ from burnbird.email import outbox
 from burnbird.email.outbox import Mail
 from burnbird.github import backfill, events, reconcile, redeliver
 from burnbird.github.client import GithubApp
-from burnbird.models import GithubUser, UserEmail, UserSession, WebhookDelivery, WorkerTask
+from burnbird.models import (
+    Account,
+    GithubUser,
+    Installation,
+    Repository,
+    UserEmail,
+    UserInstallation,
+    UserSession,
+    WebhookDelivery,
+    WorkerTask,
+)
 from burnbird.worker import run_once
-from tests.email.examples import RecordingSender, example_environment
+from tests.email.examples import (
+    RecordingSender,
+    example_environment,
+    example_params,
+    example_usage,
+)
 
 NOW = datetime(2026, 11, 14, 12, 0, tzinfo=UTC)
 
@@ -192,16 +207,29 @@ def test_a_pass_sends_the_queued_emails(
     sessions: sessionmaker[Session], session: Session, github: GithubApp, mail: Mail
 ) -> None:
     session.add(GithubUser(id=7302, login="example-recipient", last_sign_in_at=NOW))
+    session.add(
+        Account(id=7302, login="example-recipient", type="User", github_plan="GitHub Free")
+    )
     session.flush()
-    session.add(UserEmail(user_id=7302, address="r" + "@" + "example.invalid", read_at=NOW))
+    session.add(Installation(id=8302, account_id=7302, created_at=NOW))
+    session.flush()
+    session.add(Repository(id=9302, installation_id=8302, name="app", private=True))
+    session.flush()
+    session.add_all(
+        [
+            UserInstallation(user_id=7302, installation_id=8302),
+            UserEmail(user_id=7302, address="r" + "@" + "example.invalid", read_at=NOW),
+            example_usage(9302, 9302, NOW - timedelta(hours=1)),
+        ]
+    )
     outbox.enqueue(
         session,
         user_id=7302,
-        account_id=None,
+        account_id=7302,
         kind="service",
         template="run_out_warning",
         dedupe_key="example:worker",
-        params={"account": None},
+        params=example_params(NOW),
         now=NOW,
         expires_at=NOW + timedelta(days=1),
     )

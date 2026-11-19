@@ -4,16 +4,20 @@ Every test enqueues its own rows; the provider is a recording fake, so no email 
 """
 
 import hashlib
+import itertools
 import logging
 import re
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from typing import Any
 
 import pytest
-from sqlalchemy import Connection, event, select
+from sqlalchemy import Connection, delete, event, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
+from burnbird import retention
 from burnbird.email import outbox
 from burnbird.email.outbox import Mail
 from burnbird.email.sender import Result
@@ -23,6 +27,8 @@ from burnbird.models import (
     EmailPreference,
     GithubUser,
     Installation,
+    Job,
+    Repository,
     UserEmail,
     UserInstallation,
     WorkerTask,
@@ -33,20 +39,65 @@ NOW = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
 ORIGIN = "https://burnbird.example.invalid"
 USER, OTHER = 7601, 7602
 INSTALLATION = {USER: 8601, OTHER: 8602}
+# Installed long before NOW's cycle (1 to 30 November 2026), so every day of it is complete.
+INSTALLED = datetime(2026, 9, 1, tzinfo=UTC)
+CYCLE_START = date(2026, 11, 1)
+_JOB_IDS = itertools.count(1)
 
 
 def _address(user: int) -> str:
     return f"user-{user}" + "@" + "example.invalid"
 
 
+def _use(session: Session, user: int, minutes: dict[date, int]) -> int:
+    """Store Blacksmith jobs of the given minutes per day in a repository of the user's account."""
+    repository_id = 9000 + user
+    if session.get(Repository, repository_id) is None:
+        session.add(
+            Repository(
+                id=repository_id,
+                installation_id=INSTALLATION[user],
+                name="app",
+                private=True,
+                backfilled_at=INSTALLED,
+            )
+        )
+        session.flush()
+    for day, amount in minutes.items():
+        completed = datetime.combine(day, datetime.min.time(), UTC) + timedelta(hours=12)
+        job_id = next(_JOB_IDS)
+        session.add(
+            Job(
+                id=job_id,
+                run_attempt=1,
+                run_id=job_id,
+                repository_id=repository_id,
+                labels=["blacksmith-2vcpu-ubuntu-2404"],
+                created_at=completed,
+                started_at=completed - timedelta(minutes=amount),
+                completed_at=completed,
+                provider="blacksmith",
+                runner_class="linux-x64-2vcpu",
+                billed_minutes=Decimal(amount),
+                amount=Decimal(amount),
+            )
+        )
+    session.flush()
+    return repository_id
+
+
 @pytest.fixture
 def recipients(session: Session) -> Session:
-    """Two users, each with a personal installation they can see, an address and warnings on."""
+    """Two users, each with a personal installation they can see, an address and warnings on.
+
+    Each account has used 2,400 of its 3,000 free Blacksmith minutes (80%) on 1 November, so a
+    used-75 warning, the rows' default, is still true at send.
+    """
     for user in (USER, OTHER):
         session.add(GithubUser(id=user, login=f"example-{user}", last_sign_in_at=NOW))
         session.add(Account(id=user, login=f"example-{user}", type="User", github_plan="Free"))
         session.flush()
-        session.add(Installation(id=INSTALLATION[user], account_id=user, created_at=NOW))
+        session.add(Installation(id=INSTALLATION[user], account_id=user, created_at=INSTALLED))
         session.flush()
         session.add_all(
             [
@@ -55,7 +106,8 @@ def recipients(session: Session) -> Session:
                 EmailPreference(user_id=user, kind="usage_warnings", enabled=True, updated_at=NOW),
             ]
         )
-    session.flush()
+        session.flush()
+        _use(session, user, {CYCLE_START: 2400})
     return session
 
 
@@ -75,6 +127,24 @@ def mail(sender: RecordingSender) -> Mail:
     return Mail(sender=sender, origin=ORIGIN, environment=example_environment())
 
 
+def _params(
+    kind: str = "used-75",
+    *,
+    provider: str = "blacksmith",
+    cycle_start: date = CYCLE_START,
+    repository_id: int | None = None,
+    runner_class: str | None = None,
+) -> dict[str, Any]:
+    """A run-out warning's params: only the provider, kind, cycle start and two IDs."""
+    return {
+        "provider": provider,
+        "kind": kind,
+        "cycle_start": cycle_start.isoformat(),
+        "repository_id": repository_id,
+        "runner_class": runner_class,
+    }
+
+
 def _queue(
     session: Session,
     key: str,
@@ -83,6 +153,7 @@ def _queue(
     kind: str = "usage_warnings",
     account: int | None = USER,
     expires_at: datetime = NOW + timedelta(days=1),
+    params: dict[str, Any] | None = None,
 ) -> uuid.UUID:
     assert outbox.enqueue(
         session,
@@ -91,7 +162,7 @@ def _queue(
         kind=kind,
         template="run_out_warning",
         dedupe_key=key,
-        params={"account": account},
+        params=_params() if params is None else params,
         now=NOW,
         expires_at=expires_at,
     )
@@ -181,7 +252,7 @@ def test_a_usage_email_is_sent_once_with_its_one_click_link(
     [message] = sender.sent
     assert message.reference == row_id
     assert message.to == _address(USER)
-    assert message.subject == f"Example warning for {USER}"
+    assert message.subject == "Example used-75 warning"
     assert message.unsubscribe_url is not None
     token = message.unsubscribe_url.removeprefix(f"{ORIGIN}/email/unsubscribe/")
     row = _row(recipients, row_id)
@@ -195,7 +266,7 @@ def test_a_usage_email_is_sent_once_with_its_one_click_link(
 def test_a_service_email_has_no_unsubscribe_link(
     sessions: sessionmaker[Session], recipients: Session, mail: Mail, sender: RecordingSender
 ) -> None:
-    row_id = _queue(recipients, "example:service", kind="service", account=None)
+    row_id = _queue(recipients, "example:service", kind="service")
     outbox.run(sessions, mail, NOW)
     [message] = sender.sent
     assert message.unsubscribe_url is None
@@ -331,7 +402,7 @@ def test_warnings_turned_off_skip_a_usage_email_but_not_a_service_email(
     sessions: sessionmaker[Session], recipients: Session, mail: Mail, sender: RecordingSender
 ) -> None:
     usage = _queue(recipients, "example:off")
-    service = _queue(recipients, "example:service-off", kind="service", account=None)
+    service = _queue(recipients, "example:service-off", kind="service")
     recipients.get_one(EmailPreference, (USER, "usage_warnings")).enabled = False
     recipients.flush()
     outbox.run(sessions, mail, NOW)
@@ -348,6 +419,152 @@ def test_an_email_about_an_account_the_user_can_no_longer_see_is_skipped(
     outbox.run(sessions, mail, NOW)
     assert sender.sent == []
     assert _row(recipients, row_id).outcome == "no_access"
+
+
+# ---------- freshness and the run-out forecast, again at send ----------
+
+
+@pytest.mark.parametrize("kind", ["usage_warnings", "service"])
+def test_an_address_past_its_freshness_is_not_mailed(
+    sessions: sessionmaker[Session],
+    recipients: Session,
+    mail: Mail,
+    sender: RecordingSender,
+    kind: str,
+) -> None:
+    # The daily purge deletes an address not read for EMAIL_FRESHNESS; until it runs, the send
+    # checks the same rule itself. One just inside it is still mailed.
+    stale = _queue(recipients, "example:stale", kind=kind)
+    fresh = _queue(recipients, "example:fresh", user=OTHER, account=OTHER, kind=kind)
+    edge = NOW - retention.EMAIL_FRESHNESS
+    recipients.get_one(UserEmail, USER).read_at = edge - timedelta(seconds=1)
+    recipients.get_one(UserEmail, OTHER).read_at = edge
+    recipients.flush()
+    outbox.run(sessions, mail, NOW)
+    assert (_row(recipients, stale).state, _row(recipients, stale).outcome) == (
+        "skipped",
+        "stale_address",
+    )
+    assert [message.reference for message in sender.sent] == [fresh]
+
+
+def test_a_run_out_forecast_no_longer_true_is_skipped(
+    sessions: sessionmaker[Session], recipients: Session, mail: Mail, sender: RecordingSender
+) -> None:
+    # 2,400 used on 1 November and 60 a day from 10 to 16 November: 2,820 used, 180 left at a
+    # pace of 60 is reached on 19 November. The other account used nothing in its last 7 days:
+    # no pace, so no run-out (its warning was queued before its jobs were deleted, say).
+    _use(recipients, USER, {date(2026, 11, d): 60 for d in range(10, 17)})
+    still = _queue(recipients, "example:still", params=_params("runs-out-before-reset"))
+    gone = _queue(
+        recipients,
+        "example:gone",
+        user=OTHER,
+        account=OTHER,
+        params=_params("runs-out-before-reset"),
+    )
+    outbox.run(sessions, mail, NOW)
+    assert [message.reference for message in sender.sent] == [still]
+    assert (_row(recipients, gone).state, _row(recipients, gone).outcome) == (
+        "skipped",
+        "no_longer_true",
+    )
+
+
+def test_a_ran_out_warning_the_state_no_longer_shows_is_skipped(
+    sessions: sessionmaker[Session], recipients: Session, mail: Mail, sender: RecordingSender
+) -> None:
+    # 600 more on 3 November uses up the 3,000; the other account is still at 2,400.
+    _use(recipients, USER, {date(2026, 11, 3): 600})
+    shown = _queue(recipients, "example:ran-out", params=_params("ran-out"))
+    deleted = _queue(
+        recipients, "example:ran-out:gone", user=OTHER, account=OTHER, params=_params("ran-out")
+    )
+    outbox.run(sessions, mail, NOW)
+    assert [message.reference for message in sender.sent] == [shown]
+    assert _row(recipients, deleted).outcome == "no_longer_true"
+
+
+def test_a_percentage_warning_below_its_threshold_now_is_skipped(
+    sessions: sessionmaker[Session], recipients: Session, mail: Mail, sender: RecordingSender
+) -> None:
+    # Both accounts are at 2,400 of 3,000, 80%. The first then reaches 2,700, 90%; the other's
+    # used-90 warning was queued before jobs were deleted, say.
+    _use(recipients, USER, {date(2026, 11, 2): 300})
+    reached = _queue(recipients, "example:90", params=_params("used-90"))
+    below = _queue(
+        recipients, "example:90:other", user=OTHER, account=OTHER, params=_params("used-90")
+    )
+    still_75 = _queue(recipients, "example:75:other", user=OTHER, account=OTHER)
+    outbox.run(sessions, mail, NOW)
+    assert {message.reference for message in sender.sent} == {reached, still_75}
+    assert (_row(recipients, below).state, _row(recipients, below).outcome) == (
+        "skipped",
+        "no_longer_true",
+    )
+    # Below 75% too, after its jobs are deleted.
+    recipients.execute(delete(Job).where(Job.repository_id == 9000 + OTHER))
+    again = _queue(recipients, "example:75:again", user=OTHER, account=OTHER)
+    outbox.run(sessions, mail, NOW)
+    assert _row(recipients, again).outcome == "no_longer_true"
+
+
+def test_a_changed_cycle_is_skipped_as_expired(
+    sessions: sessionmaker[Session], recipients: Session, mail: Mail, sender: RecordingSender
+) -> None:
+    # Queued for the October cycle; NOW is in November's (the cycle day can change too).
+    row_id = _queue(recipients, "example:october", params=_params(cycle_start=date(2026, 10, 1)))
+    outbox.run(sessions, mail, NOW)
+    assert (_row(recipients, row_id).state, _row(recipients, row_id).outcome) == (
+        "skipped",
+        "expired",
+    )
+    assert sender.sent == []
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"account": USER},
+        _params() | {"login": "example-login"},
+        _params(kind="used-50"),
+        _params(kind="used-75", provider="github"),
+        _params(provider="self-hosted"),
+        _params() | {"cycle_start": "1 November"},
+        _params() | {"repository_id": "5011"},
+        _params() | {"repository_id": True},
+        _params() | {"runner_class": 7},
+        list(_params()),
+        _params() | {"kind": ["used-75"]},
+    ],
+    ids=[
+        "old-shape",
+        "extra-key",
+        "unknown-kind",
+        "kind-github-does-not-get",
+        "no-allowance",
+        "not-a-date",
+        "id-as-text",
+        "id-as-bool",
+        "runner-not-text",
+        "a-list",
+        "kind-as-list",
+    ],
+)
+def test_a_row_whose_params_are_not_a_run_out_warning_s_fails_once(
+    sessions: sessionmaker[Session],
+    recipients: Session,
+    mail: Mail,
+    sender: RecordingSender,
+    params: dict[str, Any] | list[str],
+) -> None:
+    row_id = _queue(recipients, "example:params")
+    # Planted in the row as stored: the JSONB column takes any JSON, a list included.
+    recipients.execute(update(EmailOutbox).where(EmailOutbox.id == row_id).values(params=params))
+    outbox.run(sessions, mail, NOW)
+    row = _row(recipients, row_id)
+    assert (row.state, row.outcome, row.finished_at) == ("failed", "params", NOW)
+    assert sender.sent == []
 
 
 # ---------- the caps ----------
@@ -415,6 +632,31 @@ def statements(connection: Connection) -> Iterator[list[str]]:
     event.remove(connection, "before_cursor_execute", record)
 
 
+def test_a_row_waiting_at_a_cap_does_not_read_the_state(
+    sessions: sessionmaker[Session],
+    recipients: Session,
+    mail: Mail,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The state is a scan of the account's jobs under the send's locks: only a row that may go
+    # now reads it.
+    from burnbird.email.run_out import checked
+
+    read: list[uuid.UUID] = []
+
+    def counting(session: Session, row: EmailOutbox, now: datetime) -> object:
+        read.append(row.id)
+        return checked(session, row, now)
+
+    monkeypatch.setattr("burnbird.email.run_out.checked", counting)
+    _sent_before(recipients, USER, outbox.RECIPIENT_CAP, NOW - timedelta(hours=1))
+    waiting = _queue(recipients, "example:capped:state")
+    going = _queue(recipients, "example:going:state", user=OTHER, account=OTHER)
+    outbox.run(sessions, mail, NOW)
+    assert read == [going]
+    assert _row(recipients, waiting).state == "queued"
+
+
 def test_a_send_locks_the_task_row_then_the_outbox_row_and_never_the_address(
     sessions: sessionmaker[Session], recipients: Session, mail: Mail, statements: list[str]
 ) -> None:
@@ -473,6 +715,25 @@ def test_an_email_that_cannot_be_rendered_fails_once(
     # No run_out_warning template exists outside the tests yet.
     row_id = _queue(recipients, "example:render")
     outbox.run(sessions, Mail(sender=sender, origin=ORIGIN), NOW)
+    row = _row(recipients, row_id)
+    assert (row.state, row.outcome, row.finished_at) == ("failed", "render", NOW)
+    assert sender.sent == []
+
+
+def test_a_value_the_email_cannot_be_given_fails_it_once(
+    sessions: sessionmaker[Session],
+    recipients: Session,
+    sender: RecordingSender,
+    mail: Mail,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Building the email's values fails as a render does: once, never every lease.
+    def broken(*args: object, **kwargs: object) -> dict[str, object]:
+        raise ValueError("no value")
+
+    monkeypatch.setattr(outbox, "_context", broken)
+    row_id = _queue(recipients, "example:context")
+    outbox.run(sessions, mail, NOW)
     row = _row(recipients, row_id)
     assert (row.state, row.outcome, row.finished_at) == ("failed", "render", NOW)
     assert sender.sent == []

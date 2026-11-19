@@ -89,6 +89,19 @@ of its own.
   (`tests/billing/test_usage.py::test_complete_from_is_the_day_after_the_install_until_every_repository_is_backfilled`,
   `tests/billing/test_usage.py::test_complete_from_is_never_before_the_day_after_the_data_was_deleted`).
 
+## Email
+
+- An email goes only to an address a sign-in read within `retention.EMAIL_FRESHNESS`: the send checks it, not only the
+  daily purge (`tests/email/test_outbox.py::test_an_address_past_its_freshness_is_not_mailed`).
+- A run-out warning is checked again at send against `usage.allowance_state`, the state its email's dates and numbers
+  come from: one queued for another cycle is skipped as `expired`, and one the state no longer bears out (a percentage
+  now under its threshold, a run-out no longer forecast, a ran-out no longer used up) as `no_longer_true`
+  (`tests/email/test_outbox.py::test_a_changed_cycle_is_skipped_as_expired`,
+  `tests/email/test_outbox.py::test_a_run_out_forecast_no_longer_true_is_skipped`,
+  `tests/email/test_outbox.py::test_a_percentage_warning_below_its_threshold_now_is_skipped`).
+- The state is read only after the caps, so a row that waits at a cap scans no jobs under the send's locks
+  (`tests/email/test_outbox.py::test_a_row_waiting_at_a_cap_does_not_read_the_state`).
+
 ## Stored data and deletion
 
 - Every path that locks more than one repository goes through `retention.lock_repositories`, in ID order

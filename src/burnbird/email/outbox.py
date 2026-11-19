@@ -46,7 +46,7 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from datetime import time as clock_time
 from typing import Any, Final
 
@@ -112,13 +112,6 @@ class Claimed:
     id: uuid.UUID
     leased_until: datetime
     attempts: int
-
-
-def run_out_warning_key(
-    warning: str, account_id: int, provider: str, cycle_start: date, user_id: int
-) -> str:
-    """Return the dedupe key of a run-out warning: one per warning, allowance, cycle and user."""
-    return f"run_out_warning:{warning}:{account_id}:{provider}:{cycle_start.isoformat()}:{user_id}"
 
 
 def enqueue(

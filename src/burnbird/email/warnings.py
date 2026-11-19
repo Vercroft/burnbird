@@ -11,7 +11,7 @@ run-out warnings on.
 
 **What.** For each provider and only the kinds its ``email_warnings`` lists, the warnings
 ``usage.allowance_state`` makes true now. A warning is keyed once per kind, account, provider,
-cycle and person (``outbox.run_out_warning_key``): one row per key, written with ``ON CONFLICT DO
+cycle and person (``run_out.run_out_warning_key``): one row per key, written with ``ON CONFLICT DO
 NOTHING``. Of the kinds that may go (true now, and either with no row yet or with a row skipped for
 a reversible reason, ``REVERSIBLE``), only the most severe is queued, and only if no more severe
 row blocks it; nothing is recorded for the others. The order, most severe first, is ``SEVERITY``. A
@@ -46,7 +46,13 @@ from burnbird.billing.forecast import WarningKind
 from burnbird.billing.providers import Provider, load_table
 from burnbird.billing.usage import AllowanceState, Usage
 from burnbird.email import outbox
-from burnbird.email.run_out import BLOCKING, SEVERITY, TEMPLATE, WarningParams
+from burnbird.email.run_out import (
+    BLOCKING,
+    SEVERITY,
+    TEMPLATE,
+    WarningParams,
+    run_out_warning_key,
+)
 from burnbird.github import schedule
 from burnbird.models import (
     Account,
@@ -189,7 +195,7 @@ def _queue_most_severe(
     now: datetime,
 ) -> None:
     keys = {
-        kind: outbox.run_out_warning_key(
+        kind: run_out_warning_key(
             kind.value, account_id, provider.id, state.forecast.start, user_id
         )
         for kind in SEVERITY

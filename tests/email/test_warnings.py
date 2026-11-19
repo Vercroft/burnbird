@@ -14,7 +14,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird import retention
-from burnbird.email import outbox, warnings
+from burnbird.email import outbox, run_out, warnings
 from burnbird.models import (
     Account,
     EmailOutbox,
@@ -138,7 +138,7 @@ def _record(
     cycle: date = CYCLE,
 ) -> None:
     """A warning of PERSON's Blacksmith allowance recorded earlier by a run or the sender."""
-    dedupe_key = outbox.run_out_warning_key(kind, PERSON, "blacksmith", cycle, PERSON)
+    dedupe_key = run_out.run_out_warning_key(kind, PERSON, "blacksmith", cycle, PERSON)
     assert outbox.enqueue(
         session,
         user_id=PERSON,
@@ -189,7 +189,7 @@ def test_only_the_most_severe_new_warning_is_queued(
         PERSON,
         RESET,
     )
-    assert row.dedupe_key == outbox.run_out_warning_key(
+    assert row.dedupe_key == run_out.run_out_warning_key(
         "runs-out-before-reset", PERSON, "blacksmith", CYCLE, PERSON
     )
     # The cycle's top repository and runner size, as IDs only.

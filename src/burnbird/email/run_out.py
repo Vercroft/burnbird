@@ -48,7 +48,6 @@ from burnbird.billing import usage
 from burnbird.billing.forecast import WarningKind
 from burnbird.billing.providers import BLACKSMITH, GITHUB, load_table
 from burnbird.billing.usage import AllowanceState
-from burnbird.email import outbox
 from burnbird.github.client import (
     GithubAnswerError,
     GithubApp,
@@ -97,6 +96,13 @@ _DRAFTS: Final = {
     (BLACKSMITH, WarningKind.RUNS_OUT_BEFORE_RESET): "blacksmith-runs-out",
     (BLACKSMITH, WarningKind.RAN_OUT): "blacksmith-ran-out",
 }
+
+
+def run_out_warning_key(
+    warning: str, account_id: int, provider: str, cycle_start: date, user_id: int
+) -> str:
+    """Return the dedupe key of a run-out warning: one per warning, allowance, cycle and user."""
+    return f"run_out_warning:{warning}:{account_id}:{provider}:{cycle_start.isoformat()}:{user_id}"
 
 
 class SkippedError(Exception):
@@ -193,7 +199,7 @@ def checked(session: Session, row: EmailOutbox, now: datetime) -> Checked:
     # still going: a run can leave this row queued while the sender holds it (a cap, a retry).
     # Asked by its dedupe key, as the queueing step asks.
     keys = [
-        outbox.run_out_warning_key(
+        run_out_warning_key(
             kind.value, row.account_id, warning.provider, warning.cycle_start, row.user_id
         )
         for kind in SEVERITY[: SEVERITY.index(warning.kind)]

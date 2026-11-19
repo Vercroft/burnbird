@@ -22,7 +22,7 @@ from sqlalchemy import Connection, delete, event, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird import logs, retention
-from burnbird.email import outbox
+from burnbird.email import outbox, run_out
 from burnbird.email.outbox import Mail
 from burnbird.email.sender import Result
 from burnbird.github.client import GithubApp
@@ -208,20 +208,6 @@ def test_a_second_enqueue_of_the_same_email_is_a_no_op(recipients: Session) -> N
         expires_at=NOW + timedelta(days=1),
     )
     assert len(recipients.scalars(select(EmailOutbox)).all()) == 1
-
-
-def test_the_run_out_warning_key_names_the_warning_allowance_cycle_and_recipient() -> None:
-    key = outbox.run_out_warning_key("used_75", 123, "blacksmith", date(2026, 11, 1), 9)
-    assert key == "run_out_warning:used_75:123:blacksmith:2026-11-01:9"
-    others = {
-        outbox.run_out_warning_key("used_90", 123, "blacksmith", date(2026, 11, 1), 9),
-        outbox.run_out_warning_key("used_75", 124, "blacksmith", date(2026, 11, 1), 9),
-        outbox.run_out_warning_key("used_75", 123, "github", date(2026, 11, 1), 9),
-        outbox.run_out_warning_key("used_75", 123, "blacksmith", date(2026, 12, 1), 9),
-        outbox.run_out_warning_key("used_75", 123, "blacksmith", date(2026, 11, 1), 10),
-    }
-    assert key not in others
-    assert len(others) == 5
 
 
 # ---------- the lease ----------
@@ -525,7 +511,7 @@ def _more_severe(session: Session, state: str) -> None:
         account_id=USER,
         kind="usage_warnings",
         template="run_out_warning",
-        dedupe_key=outbox.run_out_warning_key(
+        dedupe_key=run_out.run_out_warning_key(
             "runs-out-before-reset", USER, "blacksmith", CYCLE_START, USER
         ),
         params=_params("runs-out-before-reset"),

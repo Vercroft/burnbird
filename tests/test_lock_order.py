@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from burnbird import retention
 from burnbird.account.service import save_warnings
 from burnbird.auth.service import ListedRepository, SignIn, session_digest, store_sign_in
-from burnbird.email import outbox, unsubscribe, warnings, webhook
+from burnbird.email import outbox, run_out, unsubscribe, warnings, webhook
 from burnbird.email.outbox import Mail
 from burnbird.email.preferences import set_choice
 from burnbird.github import backfill, reconcile, schemas
@@ -1758,7 +1758,7 @@ def test_a_delete_my_data_during_a_run_does_not_deadlock(
             account_id=user_id,
             kind="usage_warnings",
             template="run_out_warning",
-            dedupe_key=outbox.run_out_warning_key(
+            dedupe_key=run_out.run_out_warning_key(
                 "used-75", user_id, "blacksmith", NOW.date().replace(day=1), user_id
             ),
             params=example_params(NOW),
@@ -1797,7 +1797,7 @@ def test_an_uninstall_during_a_run_does_not_deadlock(engine: Engine, cleanup: li
             account_id=user_id,
             kind="usage_warnings",
             template="run_out_warning",
-            dedupe_key=outbox.run_out_warning_key(
+            dedupe_key=run_out.run_out_warning_key(
                 "used-75", user_id, "blacksmith", NOW.date().replace(day=1), user_id
             ),
             params=example_params(NOW),
@@ -1843,7 +1843,7 @@ def test_a_run_does_not_wait_for_a_warning_being_sent(
             account_id=user_id,
             kind="usage_warnings",
             template="run_out_warning",
-            dedupe_key=outbox.run_out_warning_key(
+            dedupe_key=run_out.run_out_warning_key(
                 "used-75", user_id, "blacksmith", NOW.date().replace(day=1), user_id
             ),
             params=example_params(NOW),

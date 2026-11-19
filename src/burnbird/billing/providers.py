@@ -2,6 +2,8 @@
 
 The facts are data in ``providers.toml``, shipped inside the package. They are validated when the
 table loads, so a bad row fails at once with its name instead of turning into a wrong number later.
+Each provider also lists the warnings Burnbird emails for it: only those the provider does not send
+itself, with the page that describes the provider's own.
 """
 
 import functools
@@ -14,6 +16,8 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from importlib import resources
 from typing import Any
+
+from burnbird.billing.forecast import WarningKind
 
 GITHUB = "github"
 BLACKSMITH = "blacksmith"
@@ -51,8 +55,20 @@ class Allowance:
 
 
 @dataclass(frozen=True, slots=True)
+class OwnWarnings:
+    """The page that describes the warnings a provider sends itself, and the day it was read."""
+
+    source: str
+    read: date
+
+
+@dataclass(frozen=True, slots=True)
 class Provider:
-    """A provider of runners, its rounding rule and its allowances."""
+    """A provider of runners, its rounding rule, its allowances and the warnings Burnbird emails.
+
+    ``email_warnings`` are the kinds Burnbird emails for the provider: only those it does not send
+    itself, as ``own_warnings`` describes.
+    """
 
     id: str
     name: str
@@ -61,6 +77,8 @@ class Provider:
     allowances: tuple[Allowance, ...]
     sources: tuple[str, ...]
     read: date
+    email_warnings: tuple[WarningKind, ...]
+    own_warnings: OwnWarnings
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +141,16 @@ def _provider(row: dict[str, Any], position: int) -> Provider:
     _check_keys(
         row,
         where,
-        required={"id", "name", "rounding", "estimate", "sources", "read"},
+        required={
+            "id",
+            "name",
+            "rounding",
+            "estimate",
+            "sources",
+            "read",
+            "email_warnings",
+            "own_warnings",
+        },
         optional={"allowance"},
     )
     allowances = tuple(
@@ -138,7 +165,31 @@ def _provider(row: dict[str, Any], position: int) -> Provider:
         allowances=allowances,
         sources=_sources(row, where),
         read=_read(row, where),
+        email_warnings=_warning_kinds(row, where),
+        own_warnings=_own_warnings(row, where),
     )
+
+
+def _warning_kinds(row: dict[str, Any], where: str) -> tuple[WarningKind, ...]:
+    kinds: list[WarningKind] = []
+    for text in _strings(row, "email_warnings", where):
+        kind = _choice(WarningKind, {"email_warnings": text}, "email_warnings", where)
+        if kind in kinds:
+            raise ProviderTableError(f"{where}: email_warnings lists {kind} twice")
+        kinds.append(kind)
+    return tuple(kinds)
+
+
+def _own_warnings(row: dict[str, Any], where: str) -> OwnWarnings:
+    value = row["own_warnings"]
+    if not isinstance(value, dict):
+        raise ProviderTableError(f"{where}: own_warnings must be a table")
+    inner = f"{where} own_warnings"
+    _check_keys(value, inner, required={"source", "read"})
+    source = _string(value, "source", inner)
+    if not source.startswith("https://"):
+        raise ProviderTableError(f"{inner}: source must be an https:// link")
+    return OwnWarnings(source=source, read=_read(value, inner))
 
 
 def _allowance(row: dict[str, Any], where: str) -> Allowance:

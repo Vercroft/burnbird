@@ -8,6 +8,8 @@ One pull request does all of it.
 3. Add one fixture job per new row to `FIXTURES` in `tests/billing/test_classify.py`. The coverage test fails for a
    row without one.
 4. For a new runner size of a listed provider, stop here: it is data only.
-5. For a new provider, add its step to the classification order in `src/burnbird/billing/classify.py`.
+5. For a new provider, add its step to the classification order in `src/burnbird/billing/classify.py`. Give its
+   `[[provider]]` row `email_warnings`, the warning kinds the provider does not send itself, and `own_warnings`, the
+   page that describes those it does send and the date you read it.
 6. For a new rounding rule or a new kind of allowance, change `src/burnbird/billing/counting.py` or
    `src/burnbird/billing/forecast.py`, with tests.

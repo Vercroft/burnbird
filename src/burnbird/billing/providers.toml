@@ -8,6 +8,9 @@
 # [L]  https://docs.github.com/en/actions/reference/runners/larger-runners
 # [R]  https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job
 # [BS] https://docs.blacksmith.sh/blacksmith-runners/overview
+#
+# email_warnings are the kinds Burnbird emails for a provider (burnbird.billing.forecast.WarningKind): only those the
+# provider does not send itself. own_warnings names the page that describes the provider's own warnings.
 
 # GitHub rounds each job up to a whole minute [P]. Included usage is money, reset each billing cycle [B].
 [[provider]]
@@ -20,6 +23,12 @@ sources = [
     "https://docs.github.com/en/billing/reference/actions-runner-pricing",
 ]
 read = "2026-11-13"
+# GitHub emails at 90% and 100% of included usage itself, since 2026-03-03, so Burnbird adds only the forecast.
+email_warnings = ["runs-out-before-reset"]
+
+[provider.own_warnings]
+source = "https://github.blog/changelog/2026-03-03-email-notifications-for-included-usage-thresholds/"
+read = "2026-11-18"
 
 [[provider.allowance]]
 plan = "GitHub Free"
@@ -60,6 +69,13 @@ rounding = "job-up-to-minute"
 estimate = true
 sources = ["https://docs.blacksmith.sh/blacksmith-runners/overview"]
 read = "2026-11-13"
+# No usage warning of Blacksmith's own was found: its only alert is a monthly spending threshold the user sets. So
+# Burnbird emails every kind.
+email_warnings = ["used-75", "used-90", "runs-out-before-reset", "ran-out"]
+
+[provider.own_warnings]
+source = "https://docs.blacksmith.sh/introduction/settings"
+read = "2026-11-18"
 
 [[provider.allowance]]
 plan = "every organization"
@@ -75,6 +91,12 @@ rounding = "none"
 estimate = false
 sources = ["https://docs.github.com/en/billing/concepts/product-billing/github-actions"]
 read = "2026-11-13"
+# No allowance, so nothing to warn about.
+email_warnings = []
+
+[provider.own_warnings]
+source = "https://docs.github.com/en/billing/concepts/product-billing/github-actions"
+read = "2026-11-18"
 
 # GitHub-hosted standard runners. Ids are GitHub's SKU names. Free in public repositories [B].
 

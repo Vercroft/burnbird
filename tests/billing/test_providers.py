@@ -2,6 +2,7 @@ from decimal import Decimal
 
 import pytest
 
+from burnbird.billing.forecast import WarningKind
 from burnbird.billing.providers import ProviderTableError, load_table, parse_table
 
 
@@ -14,6 +15,44 @@ def test_the_shipped_table_loads() -> None:
     table = load_table()
     assert [provider.id for provider in table.providers] == ["github", "blacksmith", "self-hosted"]
     assert table.runners
+
+
+def test_every_provider_lists_the_warnings_burnbird_emails() -> None:
+    # Burnbird emails only what the provider does not send itself: GitHub emails its own 90% and
+    # 100% of included usage; no usage warning of Blacksmith's own was found; self-hosted runners
+    # have no allowance.
+    providers = {provider.id: provider for provider in load_table().providers}
+    assert {key: provider.email_warnings for key, provider in providers.items()} == {
+        "github": (WarningKind.RUNS_OUT_BEFORE_RESET,),
+        "blacksmith": (
+            WarningKind.USED_75,
+            WarningKind.USED_90,
+            WarningKind.RUNS_OUT_BEFORE_RESET,
+            WarningKind.RAN_OUT,
+        ),
+        "self-hosted": (),
+    }
+    for provider in providers.values():
+        assert provider.own_warnings.source.startswith("https://"), provider.id
+
+
+def test_github_emails_only_the_run_out_forecast() -> None:
+    github = next(p for p in load_table().providers if p.id == "github")
+    assert github.email_warnings == (WarningKind.RUNS_OUT_BEFORE_RESET,)
+    assert github.own_warnings.source == (
+        "https://github.blog/changelog/2026-03-03-email-notifications-for-included-usage-thresholds/"
+    )
+
+
+def test_an_unknown_warning_kind_is_refused() -> None:
+    old = 'email_warnings = ["runs-out-before-reset"]'
+    assert VALID.count(old) == 1
+    with pytest.raises(ProviderTableError) as error:
+        parse_table(VALID.replace(old, 'email_warnings = ["used-50"]'))
+    assert str(error.value) == (
+        "provider github: email_warnings 'used-50' is not one of used-75, used-90, "
+        "runs-out-before-reset, ran-out"
+    )
 
 
 def test_github_enterprise_allowance_matches_its_documented_minutes() -> None:
@@ -52,6 +91,8 @@ rounding = "job-up-to-minute"
 estimate = false
 sources = ["https://docs.example.com/billing"]
 read = "2026-11-13"
+email_warnings = ["runs-out-before-reset"]
+own_warnings = { source = "https://docs.example.com/alerts", read = "2026-11-18" }
 
 [[provider.allowance]]
 plan = "Free"
@@ -66,6 +107,8 @@ rounding = "job-up-to-minute"
 estimate = true
 sources = ["https://docs.example.com/blacksmith"]
 read = "2026-11-13"
+email_warnings = ["used-75", "used-90", "runs-out-before-reset", "ran-out"]
+own_warnings = { source = "https://docs.example.com/settings", read = "2026-11-18" }
 
 [[runner]]
 provider = "github"
@@ -209,6 +252,54 @@ def test_the_valid_example_parses() -> None:
             'rounding = "per-second"\nestimate = false',
             "provider github: rounding 'per-second' is not one of job-up-to-minute, none",
             id="unknown-rounding",
+        ),
+        pytest.param(
+            'email_warnings = ["runs-out-before-reset"]\n',
+            "",
+            "provider github: missing email_warnings",
+            id="email-warnings-missing",
+        ),
+        pytest.param(
+            'own_warnings = { source = "https://docs.example.com/alerts", read = "2026-11-18" }\n',
+            "",
+            "provider github: missing own_warnings",
+            id="own-warnings-missing",
+        ),
+        pytest.param(
+            'email_warnings = ["runs-out-before-reset"]',
+            'email_warnings = "runs-out-before-reset"',
+            "provider github: email_warnings must be a list of non-empty strings",
+            id="email-warnings-not-a-list",
+        ),
+        pytest.param(
+            '["used-75", "used-90"',
+            '["used-75", "used-75"',
+            "provider blacksmith: email_warnings lists used-75 twice",
+            id="email-warnings-twice",
+        ),
+        pytest.param(
+            '"https://docs.example.com/alerts"',
+            '"http://docs.example.com/alerts"',
+            "provider github own_warnings: source must be an https:// link",
+            id="own-warnings-not-https",
+        ),
+        pytest.param(
+            'read = "2026-11-18" }\n\n[[provider.allowance]]',
+            'read = "18 Nov 2026" }\n\n[[provider.allowance]]',
+            "provider github own_warnings: read '18 Nov 2026' is not",
+            id="own-warnings-read",
+        ),
+        pytest.param(
+            '"https://docs.example.com/alerts", read',
+            '"https://docs.example.com/alerts", seen = "2026-11-18", read',
+            "provider github own_warnings: unknown key seen",
+            id="own-warnings-unknown-key",
+        ),
+        pytest.param(
+            'own_warnings = { source = "https://docs.example.com/alerts", read = "2026-11-18" }',
+            'own_warnings = "https://docs.example.com/alerts"',
+            "provider github: own_warnings must be a table",
+            id="own-warnings-not-a-table",
         ),
         pytest.param(
             'kind = "standard"\n',

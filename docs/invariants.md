@@ -66,6 +66,15 @@ of its own.
   (`tests/github/test_redeliver.py`).
 - What stays lost is re-queued for the backfill once per cause (`tests/github/test_redeliver.py`).
 
+## Billing
+
+- Each provider's `email_warnings` in `providers.toml` lists the only warning kinds Burnbird may email about it: those
+  the provider does not send itself, as the page in its `own_warnings` describes. GitHub's list is the run-out
+  forecast alone, because GitHub emails its own 90% and 100%; a missing list or an unknown kind fails the table's load
+  (`tests/billing/test_providers.py::test_every_provider_lists_the_warnings_burnbird_emails`,
+  `tests/billing/test_providers.py::test_github_emails_only_the_run_out_forecast`,
+  `tests/billing/test_providers.py::test_an_unknown_warning_kind_is_refused`).
+
 ## Stored data and deletion
 
 - Every path that locks more than one repository goes through `retention.lock_repositories`, in ID order

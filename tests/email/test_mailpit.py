@@ -44,7 +44,7 @@ def test_a_usage_email_reaches_mailpit_with_its_headers(mailpit: tuple[SmtpSetti
         subject=f"Example {reference.hex}",
         html=html,
         text=text,
-        context={"name": "example"},
+        context={"name": "example", "until": "15 December 2026 (UTC)"},
         origin=ORIGIN,
         unsubscribe_url=unsubscribe,
     )

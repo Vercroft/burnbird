@@ -115,6 +115,16 @@ of its own.
   `tests/email/test_outbox.py::test_an_answer_names_only_the_repository_it_was_asked_about`).
 - A failed check logs the outbox ID and a code, never the login or the repository's name
   (`tests/email/test_outbox.py::test_a_failed_check_logs_one_warning_without_login_or_name`).
+- A GitHub run-out warning gives no amount, since included usage is money; a Blacksmith one gives whole minutes. Every
+  date reads "17 November 2026 (UTC)", with month names that no locale changes
+  (`tests/email/test_run_out_warning.py::test_no_amount_in_dollars`,
+  `tests/email/test_run_out_warning.py::test_every_date_says_utc`,
+  `tests/email/test_run_out_warning.py::test_month_names_come_from_the_fixed_list`).
+- Each warning has its own draft by provider and kind; one without a draft fails, never sent in another's words
+  (`tests/email/test_run_out_warning.py::test_a_warning_with_no_wording_of_its_own_is_refused`).
+- An email's HTML part escapes every value, and its subject is one line
+  (`tests/email/test_run_out_warning.py::test_html_escapes_every_value`,
+  `tests/email/test_run_out_warning.py::test_no_subject_holds_a_line_break`).
 
 ## Stored data and deletion
 

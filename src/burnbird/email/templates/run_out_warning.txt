@@ -1,0 +1,17 @@
+{% extends 'email/layout.txt' %}
+{#- One paragraph per warning. Every date carries "(UTC)"; a GitHub warning gives no amount. -#}
+{% block body -%}
+{%- if draft == "github-runs-out" -%}
+At its pace over the last {{ pace_days }} days, {{ account }} uses up its included GitHub Actions usage on {{ on }}, before it resets on {{ reset }}. After that, GitHub bills further use or stops jobs, as your budget settings decide.
+{%- elif draft == "blacksmith-ran-out" -%}
+{{ account }} used up its {{ allowance }} free Blacksmith minutes on {{ on }}. Blacksmith keeps running, so billing started that day. The free minutes reset on {{ reset }}.
+{%- elif draft == "blacksmith-runs-out" -%}
+At its pace over the last {{ pace_days }} days, {{ account }} uses up its {{ allowance }} free Blacksmith minutes on {{ on }}, before they reset on {{ reset }}. Blacksmith keeps running after that, so billing starts that day.
+{%- elif draft == "blacksmith-used" -%}
+{{ account }} has used at least {{ percent }}% of its {{ allowance }} free Blacksmith minutes this cycle, about {{ used }} as of {{ today }}. They reset on {{ reset }}.
+{%- else -%}
+{{ no_wording_for_this_draft }}
+{%- endif -%}
+{%- if runner %} Most used this cycle: {% if repository %}{{ repository }} on {{ runner }}.{% else %}{{ runner }}. See which repository on the page.{% endif %}{% endif -%}
+{%- if draft != "github-runs-out" %} Burnbird's count is an estimate: Blacksmith does not publish how it rounds.{% endif %} See the details: {{ origin }}/
+{%- endblock %}

@@ -41,6 +41,9 @@ browser sends to describe itself.
 Everything above is used to provide the service you signed up for: showing your CI minutes and when they run out.
 Run-out warnings and service notices by email, when they start, are part of that service, and you can turn the
 warnings off with the switch on your "Your data" page (/you). News about Burnbird will be sent only if you ask for it.
+A run-out warning names the account, the provider, the day its free usage runs out or ran out and the day it resets,
+the cycle's most used runner size, and for Blacksmith the minutes used (never an amount of money). It names the cycle's
+most used repository only if GitHub confirms, when the warning is sent, that you can still see it.
 If an email bounces for good, email to that address is paused. To resume, make a working address your primary email
 on GitHub and sign in again, or write to hello@burnbird.racingcrow.com. If you mark one of our emails as spam, we take
 it that you want no optional email from us: every kind is turned off and email to your address is paused. Turning

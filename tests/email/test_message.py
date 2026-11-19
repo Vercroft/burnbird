@@ -25,7 +25,7 @@ def _message(unsubscribe_url: str | None = UNSUBSCRIBE) -> Message:
         subject="Example subject",
         html=html,
         text=text,
-        context={"name": "<b>example</b>"},
+        context={"name": "<b>example</b>", "until": "15 December 2026 (UTC)"},
         origin=ORIGIN,
         unsubscribe_url=unsubscribe_url,
     )

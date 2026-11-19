@@ -93,13 +93,16 @@ class Mail:
     """What sending needs: the sender, the site's origin for links, the templates and GitHub.
 
     ``github`` asks whether a recipient can see a run-out warning's top repository; without it
-    the repository is never named.
+    the repository is never named. ``run_out_warnings`` is the switch
+    (``config.run_out_warnings_from_environment``): off, a queued run-out warning is skipped as
+    ``disabled``.
     """
 
     sender: Sender
     origin: str
     environment: Environment = field(default=ENVIRONMENT)
     github: GithubApp | None = None
+    run_out_warnings: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +213,10 @@ def send(sessions: sessionmaker[Session], mail: Mail, claimed: Claimed, now: dat
         if task.next_run_at > now:
             _put_back(row, now)
             return
+        if row.template == run_out.TEMPLATE and not mail.run_out_warnings:
+            # The switch is off: a warning already queued is not sent either.
+            _skip(row, "disabled", now)
+            return
         try:
             address, read_at = _checked_address(session, row, now)
         except _SkippedError as skip:
@@ -261,6 +268,8 @@ def _ask_about_repository(
     GET is, so at worst a token request and three tries with their waits, about 45 seconds, well
     inside the lease.
     """
+    if not mail.run_out_warnings:
+        return None
     with sessions.begin() as session:
         row = session.get(EmailOutbox, claimed.id)
         if row is None or row.state != "queued" or row.retry_at != claimed.leased_until:

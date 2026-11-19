@@ -131,3 +131,26 @@ def test_a_port_that_is_not_one_is_refused_naming_the_setting(
     monkeypatch.setenv(config.SMTP_URL_VARIABLE, url)
     with pytest.raises(ConfigError, match=config.SMTP_URL_VARIABLE):
         settings_from_environment()
+
+
+# ---------- the run-out warnings switch ----------
+
+
+def test_the_switch_is_off_unless_set_to_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(config.RUN_OUT_WARNINGS_VARIABLE, raising=False)
+    assert config.run_out_warnings_from_environment() is False
+    monkeypatch.setenv(config.RUN_OUT_WARNINGS_VARIABLE, "on")
+    assert config.run_out_warnings_from_environment() is True
+
+
+@pytest.mark.parametrize("value", ["", "off", "On", "ON", "true", "1", "yes", " on", "on "])
+def test_an_invalid_switch_value_fails_at_start(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv(config.RUN_OUT_WARNINGS_VARIABLE, value)
+    with pytest.raises(ConfigError) as error:
+        config.run_out_warnings_from_environment()
+    assert config.RUN_OUT_WARNINGS_VARIABLE in str(error.value)
+    # The message names the setting and the one accepted value, never the value it was given.
+    if value.strip() not in ("", "on"):
+        assert value.strip() not in str(error.value).replace(config.RUN_OUT_WARNINGS_VARIABLE, "")

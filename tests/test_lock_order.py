@@ -1199,7 +1199,10 @@ def sending(engine: Engine) -> Iterator[tuple[Mail, list[str]]]:
     """A recording sender and the order of events; the email task's row is deleted after."""
     events: list[str] = []
     sender = RecordingSender(on_send=lambda: events.append("sent"))
-    yield Mail(sender, "https://burnbird.example.invalid", example_environment()), events
+    mail = Mail(
+        sender, "https://burnbird.example.invalid", example_environment(), run_out_warnings=True
+    )
+    yield mail, events
     with engine.begin() as connection:
         connection.execute(delete(WorkerTask).where(WorkerTask.name == outbox.TASK))
 

@@ -9,6 +9,10 @@ The API URL defaults to the provider's India data centre, from its "Multiple Dat
 
 The provider's webhook is served only when ``BURNBIRD_ZOHO_WEBHOOK_KEY_FILE`` names the file of
 its Authentication Key; a file that is named but cannot be read, or is empty, stops the start.
+
+``BURNBIRD_RUN_OUT_WARNINGS`` is the run-out warnings' switch, read at start: unset is off, exactly
+``on`` is on, and any other value stops the start. Off, no warning is queued and every warning
+already queued is skipped as ``disabled`` instead of sent, so turning it off stops them at once.
 """
 
 import os
@@ -23,6 +27,7 @@ API_URL_VARIABLE: Final = "BURNBIRD_ZOHO_API_URL"
 API_KEY_FILE_VARIABLE: Final = "BURNBIRD_ZOHO_API_KEY_FILE"
 SMTP_URL_VARIABLE: Final = "BURNBIRD_SMTP_URL"
 WEBHOOK_KEY_FILE_VARIABLE: Final = "BURNBIRD_ZOHO_WEBHOOK_KEY_FILE"
+RUN_OUT_WARNINGS_VARIABLE: Final = "BURNBIRD_RUN_OUT_WARNINGS"
 DEFAULT_API_URL: Final = "https://cpaas.zoho.in/v1.1/email"
 # The scheme the provider puts before the token in its Authorization header; never in the file.
 AUTHORIZATION_SCHEME: Final = "Zoho-enczapikey"
@@ -103,3 +108,13 @@ def webhook_key() -> bytes | None:
     if not os.environ.get(WEBHOOK_KEY_FILE_VARIABLE):
         return None
     return read_secret_file(WEBHOOK_KEY_FILE_VARIABLE)
+
+
+def run_out_warnings_from_environment() -> bool:
+    """Return whether run-out warnings are on; ``ConfigError`` names the setting, not its value."""
+    value = os.environ.get(RUN_OUT_WARNINGS_VARIABLE)
+    if value is None:
+        return False
+    if value == "on":
+        return True
+    raise ConfigError(f"set {RUN_OUT_WARNINGS_VARIABLE} to on, or leave it unset")

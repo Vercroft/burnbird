@@ -44,6 +44,7 @@ def mail() -> Mail:
         sender=RecordingSender(),
         origin="https://burnbird.example.invalid",
         environment=example_environment(),
+        run_out_warnings=True,
     )
 
 
@@ -294,7 +295,10 @@ def test_a_pass_gives_the_email_step_the_worker_s_github_client(
     )
     sender = RecordingSender()
     mail = Mail(
-        sender=sender, origin="https://burnbird.example.invalid", environment=example_environment()
+        sender=sender,
+        origin="https://burnbird.example.invalid",
+        environment=example_environment(),
+        run_out_warnings=True,
     )
     run_once(sessions, app, NOW, mail=mail)
     app.close()

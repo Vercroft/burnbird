@@ -9,6 +9,7 @@ import logging
 import re
 import uuid
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -129,7 +130,9 @@ def sender() -> RecordingSender:
 
 @pytest.fixture
 def mail(sender: RecordingSender) -> Mail:
-    return Mail(sender=sender, origin=ORIGIN, environment=example_environment())
+    return Mail(
+        sender=sender, origin=ORIGIN, environment=example_environment(), run_out_warnings=True
+    )
 
 
 def _params(
@@ -622,7 +625,13 @@ def checking_mail(
         clock=lambda: NOW,
         sleep=lambda _: None,
     )
-    yield Mail(sender=sender, origin=ORIGIN, environment=example_environment(), github=app)
+    yield Mail(
+        sender=sender,
+        origin=ORIGIN,
+        environment=example_environment(),
+        github=app,
+        run_out_warnings=True,
+    )
     app.close()
 
 
@@ -747,7 +756,9 @@ def test_any_other_failure_of_the_check_leaves_the_name_out_and_sends(
     logs.configure(logging.DEBUG)
     logging.getLogger().addHandler(caplog.handler)
     caplog.handler.setLevel(logging.DEBUG)
-    outbox.run(sessions, Mail(sender, ORIGIN, example_environment(), github=app), NOW)
+    outbox.run(
+        sessions, Mail(sender, ORIGIN, example_environment(), app, run_out_warnings=True), NOW
+    )
     assert _row(recipients, row_id).state == "sent"
     assert REPOSITORY_NAME not in sender.sent[0].text
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
@@ -888,6 +899,47 @@ def test_a_row_that_will_not_go_is_not_checked(
     )
     outbox.run(sessions, checking_mail, NOW)
     assert github_requests == []
+
+
+# ---------- the run-out warnings switch ----------
+
+
+def test_warnings_off_skips_a_queued_warning_as_disabled(
+    sessions: sessionmaker[Session],
+    recipients: Session,
+    checking_mail: Mail,
+    sender: RecordingSender,
+    github_requests: list[httpx2.Request],
+) -> None:
+    # Turned off, a warning already queued is not sent either, and GitHub is not asked about it.
+    row_id = _top_queued(recipients)
+    outbox.run(sessions, replace(checking_mail, run_out_warnings=False), NOW)
+    row = _row(recipients, row_id)
+    assert (row.state, row.outcome, row.finished_at) == ("skipped", "disabled", NOW)
+    assert sender.sent == []
+    assert github_requests == []
+
+
+def test_warnings_on_sends_a_queued_warning(
+    sessions: sessionmaker[Session], recipients: Session, mail: Mail, sender: RecordingSender
+) -> None:
+    row_id = _queue(recipients, "example:switch:on")
+    outbox.run(sessions, replace(mail, run_out_warnings=True), NOW)
+    assert [message.reference for message in sender.sent] == [row_id]
+
+
+def test_the_switch_works_both_ways(
+    sessions: sessionmaker[Session], recipients: Session, mail: Mail, sender: RecordingSender
+) -> None:
+    on, off = replace(mail, run_out_warnings=True), replace(mail, run_out_warnings=False)
+    first = _queue(recipients, "example:switch:1")
+    outbox.run(sessions, on, NOW)
+    second = _queue(recipients, "example:switch:2", user=OTHER, account=OTHER)
+    outbox.run(sessions, off, NOW)
+    third = _queue(recipients, "example:switch:3")
+    outbox.run(sessions, on, NOW)
+    assert [message.reference for message in sender.sent] == [first, third]
+    assert _row(recipients, second).outcome == "disabled"
 
 
 # ---------- the caps ----------
@@ -1043,7 +1095,11 @@ def test_an_email_that_cannot_be_rendered_fails_once(
         )
     )
     row_id = _queue(recipients, "example:render")
-    outbox.run(sessions, Mail(sender=sender, origin=ORIGIN, environment=broken), NOW)
+    outbox.run(
+        sessions,
+        Mail(sender=sender, origin=ORIGIN, environment=broken, run_out_warnings=True),
+        NOW,
+    )
     row = _row(recipients, row_id)
     assert (row.state, row.outcome, row.finished_at) == ("failed", "render", NOW)
     assert sender.sent == []

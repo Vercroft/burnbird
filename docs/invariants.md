@@ -74,13 +74,18 @@ of its own.
   (`tests/billing/test_providers.py::test_every_provider_lists_the_warnings_burnbird_emails`,
   `tests/billing/test_providers.py::test_github_emails_only_the_run_out_forecast`,
   `tests/billing/test_providers.py::test_an_unknown_warning_kind_is_refused`).
-- The run-out pace is one rule, `burnbird.billing.forecast`'s, for the page and the email alike: the last 7 full UTC
-  days on or after the day the data is complete from, across the cycle start, the single busiest left out, and the mean
-  of the rest; with fewer than 4 such days there is no pace and no run-out forecast
-  (`tests/billing/test_forecast.py::test_the_busiest_day_is_left_out_of_the_pace`,
+- The run-out pace is one rule, `burnbird.billing.forecast`'s, for the page and the email alike, both through
+  `burnbird.billing.usage.allowance_state`: the last 7 full UTC days on or after the day the data is complete from,
+  across the cycle start, the single busiest left out, and the mean of the rest; with fewer than 4 such days there is
+  no pace and no run-out forecast (`tests/billing/test_forecast.py::test_the_busiest_day_is_left_out_of_the_pace`,
   `tests/billing/test_forecast.py::test_a_fresh_install_needs_four_full_days`,
   `tests/billing/test_forecast.py::test_the_pace_reaches_back_past_the_cycle_start`,
-  `tests/billing/test_forecast.py::test_no_pace_counts_days_before_complete_from`).
+  `tests/billing/test_forecast.py::test_no_pace_counts_days_before_complete_from`,
+  `tests/billing/test_usage.py::test_the_page_and_the_email_share_the_forecast_rule`).
+- The data is complete from the day after the installation, from the earlier cycle start once every repository is
+  backfilled, and never before the day after Delete my data
+  (`tests/billing/test_usage.py::test_complete_from_is_the_day_after_the_install_until_every_repository_is_backfilled`,
+  `tests/billing/test_usage.py::test_complete_from_is_never_before_the_day_after_the_data_was_deleted`).
 
 ## Stored data and deletion
 

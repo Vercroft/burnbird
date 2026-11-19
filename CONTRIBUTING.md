@@ -23,14 +23,12 @@ Set up once: install [uv](https://docs.astral.sh/uv/) (it installs the Python in
 | Check types | `uv run --locked mypy` | Python |
 | Check the Python version agrees everywhere | `uv run --locked pytest -n 0 tests/test_python_version.py` | Python |
 | Run the full tests (in parallel, one worker per CPU) | `uv run --locked pytest` | Python |
-| Run one test file | `uv run --locked pytest -n 0 tests/test_package.py` | none |
+| Run one test file in one process (so `-s` shows print output) | `uv run --locked pytest -n 0 tests/test_package.py` | none |
 | Check every locked package is at least 7 days old | `uv lock --check` | dependency-age |
 | Check every image your branch adds is at least 7 days old (needs Docker with buildx) | `python3 scripts/check-image-age.py --base origin/main` | dependency-age |
 | Run every small check (the hooks in `.pre-commit-config.yaml`; CI runs gitleaks as Secret scan / Full history) | `python3 -m venv "${TMPDIR:-/tmp}/checks" && "${TMPDIR:-/tmp}/checks/bin/pip" install --quiet --require-hashes --only-binary :all: -r .github/requirements/pre-commit.txt -r .github/requirements/zizmor.txt && PATH="${TMPDIR:-/tmp}/checks/bin:$PATH" pre-commit run --all-files --hook-stage manual` | Repository checks |
 | Check your commits | `BASE_SHA=$(git merge-base origin/main HEAD) HEAD_SHA=HEAD ALLOWED_COMMIT_IDENTITIES=<your noreply address> python3 .github/scripts/commit_policy.py` | Repository checks |
 | Check the links between the repository's files | `lychee --offline --no-progress './**/*.md'` | Local links |
-
-`-n 0` runs in one process, for example to see print output with `-s`.
 
 `Gate summary` passes only when every CI job passed or was skipped; it is the CI check the ruleset requires.
 
@@ -44,6 +42,7 @@ Set up once: install [uv](https://docs.astral.sh/uv/) (it installs the Python in
 | `src/burnbird/account/` | The signed-in user's own data: the "Your data" page, the email switch, Delete my data |
 | `src/burnbird/auth/` | Sign-in with GitHub, sessions, CSRF and the access filters |
 | `src/burnbird/billing/` | The provider table, job classification, minute counting and the run-out forecast |
+| `src/burnbird/billing/usage.py` | Each allowance's use per UTC day, its top repositories and its forecast: where the page and the emails read jobs |
 | `src/burnbird/email/` | Email choices and consent, the outbox and its sender, one-click unsubscribe, the provider's webhook |
 | `src/burnbird/github/` | The GitHub webhook and its worker step, the App's client, reconciliation, backfill, redelivery |
 | `src/burnbird/migrations/` | The Alembic migrations, shipped in the package |

@@ -113,7 +113,7 @@ def mail(rsa_key: RSAKey, sender: RecordingSender, permission: list[Answer]) -> 
         clock=lambda: NOW,
         sleep=lambda _: None,
     )
-    yield Mail(sender=sender, origin=ORIGIN, github=app)
+    yield Mail(sender=sender, origin=ORIGIN, github=app, run_out_warnings=True)
     app.close()
 
 

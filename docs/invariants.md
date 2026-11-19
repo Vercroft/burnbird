@@ -162,6 +162,13 @@ of its own.
 - The database URL comes only from the environment, never from a file. The tests use only `burnbird_test`, or
   `burnbird_test_gw<number>` made for one pytest-xdist worker and dropped after it (`tests/test_database_guard.py`).
 
+- Run-out warnings run only with `BURNBIRD_RUN_OUT_WARNINGS=on`; unset is off and any other value stops the start. Off
+  also stops the warnings already queued: each is skipped as `disabled` instead of sent
+  (`tests/email/test_config.py::test_the_switch_is_off_unless_set_to_on`,
+  `tests/email/test_config.py::test_an_invalid_switch_value_fails_at_start`,
+  `tests/email/test_outbox.py::test_warnings_off_skips_a_queued_warning_as_disabled`,
+  `tests/email/test_outbox.py::test_the_switch_works_both_ways`).
+
 ## Repository
 
 - No tracked file holds an email or IP address that is not on `tests/test_public_text.py`'s allowlist.

@@ -21,21 +21,27 @@ needs, and ``ask`` calls GitHub; the answer names the repository only while the 
 it. Only read, write or admin names the repository; any other
 answer or failure leaves it out, the email still goes, and one WARNING gives the outbox ID and an
 outcome code, never the login or the repository's name.
+
+The wording is in ``templates/run_out_warning.*``, one draft per provider and kind; ``context``
+gives them every value, read at send: dates as "17 November 2026 (UTC)" from a fixed list of
+English month names, never the locale; Blacksmith's counts as whole minutes with a thousands
+separator, and no amount at all for GitHub, whose included usage is money.
 """
 
 import logging
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import date, datetime
-from typing import Final
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from typing import Any, Final
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from burnbird.billing import usage
 from burnbird.billing.forecast import WarningKind
-from burnbird.billing.providers import load_table
+from burnbird.billing.providers import BLACKSMITH, GITHUB, load_table
 from burnbird.billing.usage import AllowanceState
 from burnbird.github.client import (
     GithubAnswerError,
@@ -52,6 +58,29 @@ _KEYS: Final = frozenset({"provider", "kind", "cycle_start", "repository_id", "r
 _PERCENT: Final = {WarningKind.USED_75: 75, WarningKind.USED_90: 90}
 # The permissions that let a user see a repository: GitHub's answer is admin, write, read or none.
 SEEING: Final = frozenset({"admin", "write", "read"})
+# English month names, written out here so no locale setting can change them.
+MONTHS: tuple[str, ...] = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
+# The wording of each warning a provider lists, by provider and kind; the templates branch on it.
+_DRAFTS: Final = {
+    (GITHUB, WarningKind.RUNS_OUT_BEFORE_RESET): "github-runs-out",
+    (BLACKSMITH, WarningKind.USED_75): "blacksmith-used",
+    (BLACKSMITH, WarningKind.USED_90): "blacksmith-used",
+    (BLACKSMITH, WarningKind.RUNS_OUT_BEFORE_RESET): "blacksmith-runs-out",
+    (BLACKSMITH, WarningKind.RAN_OUT): "blacksmith-ran-out",
+}
 
 
 class SkippedError(Exception):
@@ -255,3 +284,50 @@ def _failure(err: Exception) -> str:
             return "network"
         case _:
             return "error"
+
+
+def utc_date(day: date) -> str:
+    """Return a date as an email gives it: "17 November 2026 (UTC)", no leading zero."""
+    return f"{day.day} {MONTHS[day.month - 1]} {day.year} (UTC)"
+
+
+def whole(amount: Decimal) -> str:
+    """Return a count of minutes as whole minutes with a thousands separator: "2,340"."""
+    return f"{int(amount):,}"
+
+
+def account_login(session: Session, account_id: int) -> str:
+    """Return the account's login, read at send: the email names the account by it."""
+    login: str = session.execute(
+        select(Account.login).where(Account.id == account_id)
+    ).scalar_one()
+    return login
+
+
+def context(
+    warning: Checked, *, account: str, repository: str | None, now: datetime
+) -> dict[str, Any]:
+    """Return every value the templates use, read at send; GitHub's carry no amount.
+
+    Raise ``ValueError`` for a warning no draft words, so it is never sent in another's words.
+    """
+    params, forecast = warning.params, warning.state.forecast
+    draft = _DRAFTS.get((params.provider, params.kind))
+    if draft is None:
+        raise ValueError("no wording for this provider and kind")
+    counted = params.provider != GITHUB
+    return {
+        "draft": draft,
+        "account": account,
+        "provider": params.provider,
+        "kind": params.kind.value,
+        "percent": _PERCENT.get(params.kind),
+        "on": None if warning.on is None else utc_date(warning.on),
+        "reset": utc_date(forecast.reset),
+        "today": utc_date(now.astimezone(UTC).date()),
+        "pace_days": forecast.pace_days,
+        "allowance": whole(warning.state.allowance.amount) if counted else None,
+        "used": whole(forecast.used) if counted else None,
+        "repository": repository,
+        "runner": runner_name(params.provider, params.runner_class),
+    }

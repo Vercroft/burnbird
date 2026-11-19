@@ -8,6 +8,7 @@
 {% block body %}{% endblock %}
 <hr>
 {% if unsubscribe_url %}
+<p>Warnings continue until {{ until }}. Sign in to keep them.</p>
 <p><a href="{{ unsubscribe_url }}">Stop run-out warnings</a> with one click, or change your email choices on your <a href="{{ origin }}/you">"Your data" page</a>.</p>
 {% endif %}
 <p><a href="{{ origin }}/">{{ footer }}</a></p>

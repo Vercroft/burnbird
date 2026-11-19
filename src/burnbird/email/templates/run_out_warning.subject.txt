@@ -1,0 +1,11 @@
+{%- if draft == "github-runs-out" -%}
+{{ account }}: included GitHub Actions usage may run out on {{ on }}
+{%- elif draft == "blacksmith-ran-out" -%}
+{{ account }} has used all its free Blacksmith minutes
+{%- elif draft == "blacksmith-runs-out" -%}
+{{ account }}: Blacksmith billing may start on {{ on }}
+{%- elif draft == "blacksmith-used" -%}
+{{ account }} has used at least {{ percent }}% of its free Blacksmith minutes
+{%- else -%}
+{{ no_wording_for_this_draft }}
+{%- endif -%}

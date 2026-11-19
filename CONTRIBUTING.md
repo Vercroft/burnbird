@@ -43,7 +43,7 @@ Set up once: install [uv](https://docs.astral.sh/uv/) (it installs the Python in
 | `src/burnbird/auth/` | Sign-in with GitHub, sessions, CSRF and the access filters |
 | `src/burnbird/billing/` | The provider table, job classification, minute counting and the run-out forecast |
 | `src/burnbird/billing/usage.py` | Each allowance's use per UTC day, its top repositories and its forecast: where the page and the emails read jobs |
-| `src/burnbird/email/` | Email choices and consent, the outbox and its sender, the run-out warnings' checks at send, one-click unsubscribe, the provider's webhook |
+| `src/burnbird/email/` | Email choices and consent, the outbox and its sender, the run-out warnings' checks and wording at send, one-click unsubscribe, the provider's webhook |
 | `src/burnbird/github/` | The GitHub webhook and its worker step, the App's client, reconciliation, backfill, redelivery |
 | `src/burnbird/migrations/` | The Alembic migrations, shipped in the package |
 | `src/burnbird/retention.py` | Every deletion and purge, and the lock order (`lock_repositories`) |

@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx2
 import pytest
+from jinja2 import ChoiceLoader, DictLoader
 from joserfc.jwk import RSAKey
 from sqlalchemy import Connection, delete, event, select, update
 from sqlalchemy.orm import Session, sessionmaker
@@ -36,6 +37,7 @@ from burnbird.models import (
     UserInstallation,
     WorkerTask,
 )
+from burnbird.templates import ENVIRONMENT
 from tests.email.examples import RecordingSender, example_environment
 
 NOW = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
@@ -1033,9 +1035,15 @@ def test_a_sender_that_raises_is_an_unknown_outcome_never_sent_twice(
 def test_an_email_that_cannot_be_rendered_fails_once(
     sessions: sessionmaker[Session], recipients: Session, sender: RecordingSender
 ) -> None:
-    # No run_out_warning template exists outside the tests yet.
+    # A template that names a value the email does not have.
+    assert ENVIRONMENT.loader is not None
+    broken = ENVIRONMENT.overlay(
+        loader=ChoiceLoader(
+            [DictLoader({"email/run_out_warning.txt": "{{ missing }}"}), ENVIRONMENT.loader]
+        )
+    )
     row_id = _queue(recipients, "example:render")
-    outbox.run(sessions, Mail(sender=sender, origin=ORIGIN), NOW)
+    outbox.run(sessions, Mail(sender=sender, origin=ORIGIN, environment=broken), NOW)
     row = _row(recipients, row_id)
     assert (row.state, row.outcome, row.finished_at) == ("failed", "render", NOW)
     assert sender.sent == []

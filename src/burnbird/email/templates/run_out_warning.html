@@ -1,0 +1,22 @@
+{% extends 'email/layout.html' %}
+{#- The text part's sentences, autoescaped; the one content link is the dashboard. -#}
+{% block body %}
+{% if draft == "github-runs-out" -%}
+<p>At its pace over the last {{ pace_days }} days, {{ account }} uses up its included GitHub Actions usage on {{ on }}, before it resets on {{ reset }}. After that, GitHub bills further use or stops jobs, as your budget settings decide.</p>
+{%- elif draft == "blacksmith-ran-out" -%}
+<p>{{ account }} used up its {{ allowance }} free Blacksmith minutes on {{ on }}. Blacksmith keeps running, so billing started that day. The free minutes reset on {{ reset }}.</p>
+{%- elif draft == "blacksmith-runs-out" -%}
+<p>At its pace over the last {{ pace_days }} days, {{ account }} uses up its {{ allowance }} free Blacksmith minutes on {{ on }}, before they reset on {{ reset }}. Blacksmith keeps running after that, so billing starts that day.</p>
+{%- elif draft == "blacksmith-used" -%}
+<p>{{ account }} has used at least {{ percent }}% of its {{ allowance }} free Blacksmith minutes this cycle, about {{ used }} as of {{ today }}. They reset on {{ reset }}.</p>
+{%- else -%}
+{{ no_wording_for_this_draft }}
+{%- endif %}
+{% if runner -%}
+<p>Most used this cycle: {% if repository %}{{ repository }} on {{ runner }}.{% else %}{{ runner }}. See which repository on the page.{% endif %}</p>
+{% endif -%}
+{% if draft != "github-runs-out" -%}
+<p>Burnbird's count is an estimate: Blacksmith does not publish how it rounds.</p>
+{% endif -%}
+<p>See the details: <a href="{{ origin }}/">{{ origin }}/</a></p>
+{% endblock %}

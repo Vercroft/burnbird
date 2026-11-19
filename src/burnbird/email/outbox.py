@@ -211,7 +211,7 @@ def send(sessions: sessionmaker[Session], mail: Mail, claimed: Claimed, now: dat
             _put_back(row, now)
             return
         try:
-            address = _checked_address(session, row, now)
+            address, read_at = _checked_address(session, row, now)
         except _SkippedError as skip:
             _skip(row, skip.reason, now)
             return
@@ -233,7 +233,8 @@ def send(sessions: sessionmaker[Session], mail: Mail, claimed: Claimed, now: dat
                 return
         token = secrets.token_urlsafe(32) if row.kind == "usage_warnings" else None
         try:
-            message = _render(mail, row, address, token, _context(row, warning, answer))
+            context = _context(session, row, warning, answer, read_at, token, now)
+            message = _render(mail, row, address, token, context)
         except Exception:
             # A broken template stays broken: fail the email rather than try it every lease.
             logger.exception("email: %s could not be rendered, user %d", row.id, row.user_id)
@@ -303,8 +304,11 @@ class _SkippedError(Exception):
         self.reason = reason
 
 
-def _checked_address(session: Session, row: EmailOutbox, now: datetime) -> str:
-    """Return the address to send the row to, or raise ``_SkippedError`` saying why not."""
+def _checked_address(session: Session, row: EmailOutbox, now: datetime) -> tuple[str, datetime]:
+    """Return the address to send the row to and when a sign-in last read it.
+
+    Raise ``_SkippedError`` saying why not.
+    """
     if now >= row.expires_at:
         raise _SkippedError("expired")
     email = session.execute(
@@ -332,7 +336,8 @@ def _checked_address(session: Session, row: EmailOutbox, now: datetime) -> str:
         if installation is None or not account_access(session, row.user_id, installation):
             raise _SkippedError("no_access")
     address: str = email.address
-    return address
+    read_at: datetime = email.read_at
+    return address, read_at
 
 
 def _cap_wait(session: Session, row: EmailOutbox, now: datetime) -> datetime | None:
@@ -359,15 +364,26 @@ def _skip(row: EmailOutbox, reason: str, now: datetime) -> None:
 
 
 def _context(
-    row: EmailOutbox, warning: run_out.Checked | None, answer: run_out.RepositoryAnswer | None
+    session: Session,
+    row: EmailOutbox,
+    warning: run_out.Checked | None,
+    answer: run_out.RepositoryAnswer | None,
+    read_at: datetime,
+    token: str | None,
+    now: datetime,
 ) -> dict[str, Any]:
     """Return the values the email's templates use, read at send."""
-    context = dict(row.params)
-    if warning is not None:
-        context["repository"] = None if answer is None else answer.name_for(row, warning)
-        context["runner"] = run_out.runner_name(
-            warning.params.provider, warning.params.runner_class
+    context: dict[str, Any] = dict(row.params)
+    if warning is not None and row.account_id is not None:
+        context = run_out.context(
+            warning,
+            account=run_out.account_login(session, row.account_id),
+            repository=None if answer is None else answer.name_for(row, warning),
+            now=now,
         )
+    if token is not None:
+        # The day the address is deleted unless a sign-in reads it again.
+        context["until"] = run_out.utc_date((read_at + EMAIL_FRESHNESS).astimezone(UTC).date())
     return context
 
 
@@ -375,12 +391,12 @@ def _render(
     mail: Mail, row: EmailOutbox, address: str, token: str | None, context: Mapping[str, Any]
 ) -> Any:
     environment = mail.environment
+    subject = environment.get_template(f"email/{row.template}.subject.txt").render(context)
     return compose(
         reference=row.id,
         to=address,
-        subject=environment.get_template(f"email/{row.template}.subject.txt")
-        .render(context)
-        .strip(),
+        # One line: a value holding a line break could otherwise start a header of its own.
+        subject=" ".join(subject.split()),
         html=environment.get_template(f"email/{row.template}.html"),
         text=environment.get_template(f"email/{row.template}.txt"),
         context=context,

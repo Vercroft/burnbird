@@ -13,11 +13,13 @@ repos:
         args: [--config=.gitleaks.toml]
   - repo: local
     hooks:
-      # pygrep matches bytes: the UTF-8 of U+2013 and U+2014. Nothing is exempt.
+      # pygrep matches bytes: the UTF-8 of U+2013 and U+2014. Every text file is checked; a binary file can hold
+      # those bytes without a dash, so it is skipped.
       - id: dashes
         name: No em or en dashes (use a hyphen, a colon or a new sentence)
         language: pygrep
         entry: '\xe2\x80[\x93\x94]'
+        types: [text]
       - id: suppressions
         name: Suppressions are listed
         language: unsupported

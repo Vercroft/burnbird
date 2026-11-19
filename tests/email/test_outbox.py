@@ -653,6 +653,7 @@ def test_read_write_and_admin_name_the_repository(
     outbox.run(sessions, checking_mail, NOW)
     [message] = sender.sent
     assert REPOSITORY_NAME in message.text
+    assert REPOSITORY_NAME in message.html
     [check] = [r for r in github_requests if r.method == "GET"]
     assert check.url.path == f"/repos/{LOGIN}/{REPOSITORY_NAME}/collaborators/{LOGIN}/permission"
 
@@ -749,6 +750,82 @@ def test_any_other_failure_of_the_check_leaves_the_name_out_and_sends(
     assert REPOSITORY_NAME not in sender.sent[0].text
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert warnings == [f"email: {row_id}: the repository is not named (error)"]
+
+
+@pytest.mark.usefixtures("restore_logging")
+def test_an_error_of_any_kind_leaves_the_name_out_and_sends(
+    sessions: sessionmaker[Session],
+    recipients: Session,
+    checking_mail: Mail,
+    sender: RecordingSender,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An error no list of types foresees, such as one from signing the App's JWT.
+    class UnforeseenError(Exception):
+        pass
+
+    def unforeseen(*args: object) -> str:
+        raise UnforeseenError(REPOSITORY_NAME)
+
+    assert checking_mail.github is not None
+    monkeypatch.setattr(checking_mail.github, "collaborator_permission", unforeseen)
+    row_id = _top_queued(recipients)
+    logs.configure(logging.DEBUG)
+    logging.getLogger().addHandler(caplog.handler)
+    caplog.handler.setLevel(logging.DEBUG)
+    outbox.run(sessions, checking_mail, NOW)
+    assert _row(recipients, row_id).state == "sent"
+    assert REPOSITORY_NAME not in sender.sent[0].text
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == [
+        f"email: {row_id}: the repository is not named (error)"
+    ]
+    assert REPOSITORY_NAME not in caplog.text
+
+
+def test_an_answer_names_only_the_repository_it_was_asked_about(
+    sessions: sessionmaker[Session],
+    recipients: Session,
+    checking_mail: Mail,
+    sender: RecordingSender,
+    permission: list[Answer],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The row's params change while GitHub answers: the answer is about the old repository.
+    from burnbird.email.run_out import ask
+
+    permission.append(httpx2.Response(200, json={"permission": "admin"}))
+    row_id = _top_queued(recipients)
+
+    def then_change(github: GithubApp | None, row: uuid.UUID, question: Any) -> object:
+        answer = ask(github, row, question)
+        changed = _params(repository_id=9000 + OTHER, runner_class="linux-x64-2vcpu")
+        recipients.execute(
+            update(EmailOutbox).where(EmailOutbox.id == row_id).values(params=changed)
+        )
+        return answer
+
+    monkeypatch.setattr("burnbird.email.run_out.ask", then_change)
+    outbox.run(sessions, checking_mail, NOW)
+    [message] = sender.sent
+    assert REPOSITORY_NAME not in message.text
+
+
+def test_github_is_asked_only_about_a_row_that_may_go(
+    sessions: sessionmaker[Session],
+    recipients: Session,
+    checking_mail: Mail,
+    github_requests: list[httpx2.Request],
+) -> None:
+    # One waits at the recipient cap; the other's user turned warnings off.
+    _sent_before(recipients, USER, outbox.RECIPIENT_CAP, NOW - timedelta(hours=1))
+    waiting = _top_queued(recipients)
+    off = _top_queued(recipients, OTHER)
+    recipients.get_one(EmailPreference, (OTHER, "usage_warnings")).enabled = False
+    recipients.flush()
+    outbox.run(sessions, checking_mail, NOW)
+    assert github_requests == []
+    assert (_row(recipients, waiting).state, _row(recipients, off).outcome) == ("queued", "off")
 
 
 def test_the_runner_type_is_always_named(

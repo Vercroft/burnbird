@@ -1596,8 +1596,10 @@ def test_a_complaint_and_the_switch_turned_on(engine: Engine, cleanup: list[int]
 def test_the_repository_check_holds_no_lock(
     engine: Engine, cleanup: list[int], sending: tuple[Mail, list[str]], rsa_key: RSAKey
 ) -> None:
-    # The check is a network call. While GitHub answers it, another connection can lock both the
-    # email-send task row and the outbox row at once, so the send holds neither.
+    # The check is a network call. On each of its requests (the token's POST and the GET), no
+    # session is idle in a transaction, another connection takes every table the send and the
+    # question read at once, and it locks the email-send task row and the outbox row: the send
+    # holds nothing while GitHub answers.
     mail, _ = sending
     user_id = 8190
     cleanup.append(user_id)
@@ -1613,23 +1615,39 @@ def test_the_repository_check_holds_no_lock(
         connection.execute(insert(WorkerTask).values(name=outbox.TASK, next_run_at=NOW))
     probes: list[str] = []
 
+    def probe() -> str:
+        try:
+            with engine.connect() as connection, connection.begin() as transaction:
+                idle = connection.scalar(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+                        " AND state LIKE 'idle in transaction%' AND pid <> pg_backend_pid()"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "LOCK TABLE email_outbox, worker_task, repository, installation, account,"
+                        " github_user, user_email, email_preference, job"
+                        " IN ACCESS EXCLUSIVE MODE NOWAIT"
+                    )
+                )
+                for statement, key in (
+                    ("SELECT 1 FROM worker_task WHERE name = :key FOR UPDATE NOWAIT", outbox.TASK),
+                    ("SELECT 1 FROM email_outbox WHERE id = :key FOR UPDATE NOWAIT", row_id),
+                ):
+                    connection.execute(text(statement), {"key": key}).all()
+                transaction.rollback()
+        except OperationalError:
+            return "locked"
+        return "free" if idle == 0 else "in a transaction"
+
     def handle(request: httpx2.Request) -> httpx2.Response:
+        probes.append(probe())
         if request.method == "POST":
             expires = (NOW + timedelta(hours=1)).isoformat()
             return httpx2.Response(
                 201, json={"token": secrets.token_hex(20), "expires_at": expires}
             )
-        try:
-            with engine.begin() as probe:
-                for statement, values in (
-                    ("SELECT 1 FROM worker_task WHERE name = :key FOR UPDATE NOWAIT", outbox.TASK),
-                    ("SELECT 1 FROM email_outbox WHERE id = :key FOR UPDATE NOWAIT", row_id),
-                ):
-                    probe.execute(text(statement), {"key": values}).all()
-        except OperationalError:
-            probes.append("locked")
-        else:
-            probes.append("free")
         return httpx2.Response(200, json={"permission": "admin"})
 
     app = GithubApp(
@@ -1643,6 +1661,6 @@ def test_the_repository_check_holds_no_lock(
     assert isinstance(sender, RecordingSender)
     outbox.run(sessionmaker(bind=engine), replace(mail, github=app), NOW)
     app.close()
-    assert probes == ["free"]
+    assert probes == ["free", "free"]
     [message] = sender.sent
     assert "in app" in message.text

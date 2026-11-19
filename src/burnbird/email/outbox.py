@@ -198,8 +198,7 @@ def send(sessions: sessionmaker[Session], mail: Mail, claimed: Claimed, now: dat
     A run-out warning's repository check is a network call, so it is made first, with no
     transaction open: the send transaction holds its locks only for the database and the POST.
     """
-    question = run_out.repository_question(sessions, claimed.id, claimed.leased_until)
-    repository = None if question is None else run_out.ask(mail.github, claimed.id, question)
+    answer = _ask_about_repository(sessions, mail, claimed, now)
     with sessions.begin() as session:
         task = _lock_task(session, now)
         row = session.scalars(
@@ -234,7 +233,7 @@ def send(sessions: sessionmaker[Session], mail: Mail, claimed: Claimed, now: dat
                 return
         token = secrets.token_urlsafe(32) if row.kind == "usage_warnings" else None
         try:
-            message = _render(mail, row, address, token, _context(row, warning, repository))
+            message = _render(mail, row, address, token, _context(row, warning, answer))
         except Exception:
             # A broken template stays broken: fail the email rather than try it every lease.
             logger.exception("email: %s could not be rendered, user %d", row.id, row.user_id)
@@ -248,6 +247,33 @@ def send(sessions: sessionmaker[Session], mail: Mail, claimed: Claimed, now: dat
             logger.exception("email: %s: the sender raised, user %d", row.id, row.user_id)
             result = Result("unknown", "error")
         _record(row, task, result, token, now)
+
+
+def _ask_about_repository(
+    sessions: sessionmaker[Session], mail: Mail, claimed: Claimed, now: datetime
+) -> run_out.RepositoryAnswer | None:
+    """Ask GitHub, with no transaction open, whether the recipient can see the top repository.
+
+    The question is read in a short transaction that locks nothing, and only for a row that may
+    go now: still this lease's, past the address checks and under the caps. A row that will be
+    skipped or waits costs no call; the send transaction still decides. The call is made as every
+    GET is, so at worst a token request and three tries with their waits, about 45 seconds, well
+    inside the lease.
+    """
+    with sessions.begin() as session:
+        row = session.get(EmailOutbox, claimed.id)
+        if row is None or row.state != "queued" or row.retry_at != claimed.leased_until:
+            return None
+        question = run_out.repository_question(session, row)
+        if question is None:
+            return None
+        try:
+            _checked_address(session, row, now)
+        except _SkippedError:
+            return None
+        if _cap_wait(session, row, now) is not None:
+            return None
+    return run_out.ask(mail.github, claimed.id, question)
 
 
 def _paused(sessions: sessionmaker[Session], now: datetime) -> bool:
@@ -333,12 +359,12 @@ def _skip(row: EmailOutbox, reason: str, now: datetime) -> None:
 
 
 def _context(
-    row: EmailOutbox, warning: run_out.Checked | None, repository: str | None
+    row: EmailOutbox, warning: run_out.Checked | None, answer: run_out.RepositoryAnswer | None
 ) -> dict[str, Any]:
     """Return the values the email's templates use, read at send."""
     context = dict(row.params)
     if warning is not None:
-        context["repository"] = repository
+        context["repository"] = None if answer is None else answer.name_for(row, warning)
         context["runner"] = run_out.runner_name(
             warning.params.provider, warning.params.runner_class
         )

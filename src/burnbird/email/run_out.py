@@ -15,9 +15,10 @@ Params that are not a run-out warning's fail the row: a kind its provider does n
 ``email_warnings``, an unknown key, or a value of the wrong type.
 
 The runner size is always named. The top repository is named only for a recipient GitHub says can
-see it now. That question is a network call, so it is asked with no transaction open and no lock
-held: ``repository_question`` reads what it needs in a short transaction that locks nothing, and
-``ask`` calls GitHub after it ends. Only read, write or admin names the repository; any other
+see it now. That question is a network call, so the sender asks it before its send
+transaction, with no transaction open and no lock held: ``repository_question`` reads what it
+needs, and ``ask`` calls GitHub; the answer names the repository only while the row still names
+it. Only read, write or admin names the repository; any other
 answer or failure leaves it out, the email still goes, and one WARNING gives the outbox ID and an
 outcome code, never the login or the repository's name.
 """
@@ -29,9 +30,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Final
 
-import httpx2
 from sqlalchemy import select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
 from burnbird.billing import usage
 from burnbird.billing.forecast import WarningKind
@@ -150,57 +150,76 @@ def runner_name(provider: str, runner_class: str | None) -> str | None:
 
 @dataclass(frozen=True, slots=True)
 class RepositoryQuestion:
-    """What ``ask`` asks GitHub: whether this login can see this repository of this account."""
+    """What ``ask`` asks GitHub: whether this login can see this repository of this account.
 
+    The IDs say which row, recipient and repository it was asked for, so the answer is used only
+    while the row still names them.
+    """
+
+    repository_id: int
+    account_id: int
+    user_id: int
     installation_id: int
     account: str = field(repr=False)
     repository: str = field(repr=False)
     login: str = field(repr=False)
 
 
-def repository_question(
-    sessions: sessionmaker[Session], row_id: uuid.UUID, leased_until: datetime
-) -> RepositoryQuestion | None:
-    """Read what the repository check asks, in a short transaction that locks nothing.
+@dataclass(frozen=True, slots=True)
+class RepositoryAnswer:
+    """GitHub's answer: the repository's name if the recipient can see it, else None."""
 
-    None when there is nothing to ask: the row is not this lease's queued run-out warning, its
-    params are not a warning's, it names no repository or no runner size the email could name it
-    with, or the repository is no longer stored under the account.
+    question: RepositoryQuestion
+    name: str | None = field(repr=False)
+
+    def name_for(self, row: EmailOutbox, warning: Checked) -> str | None:
+        """Return the name only for the repository, account and recipient it was asked about."""
+        asked = self.question
+        same = (asked.repository_id, asked.account_id, asked.user_id) == (
+            warning.params.repository_id,
+            row.account_id,
+            row.user_id,
+        )
+        return self.name if same else None
+
+
+def repository_question(session: Session, row: EmailOutbox) -> RepositoryQuestion | None:
+    """Read what the repository check asks; no lock is taken.
+
+    None when there is nothing to ask: the row is not a run-out warning, its params are not a
+    warning's, it names no repository or no runner size the email could name it with, or the
+    repository is no longer stored under the account.
     """
-    with sessions.begin() as session:
-        row = session.get(EmailOutbox, row_id)
-        if (
-            row is None
-            or row.template != TEMPLATE
-            or row.state != "queued"
-            or row.retry_at != leased_until
-            or row.account_id is None
-        ):
-            return None
-        try:
-            warning = WarningParams.parse(row.params)
-        except InvalidParamsError:
-            return None
-        if (
-            warning.repository_id is None
-            or runner_name(warning.provider, warning.runner_class) is None
-        ):
-            return None
-        found = session.execute(
-            select(Repository.name, Installation.id, Account.login)
-            .join(Installation, Installation.id == Repository.installation_id)
-            .join(Account, Account.id == Installation.account_id)
-            .where(Repository.id == warning.repository_id, Account.id == row.account_id)
-        ).first()
-        login = session.scalar(select(GithubUser.login).where(GithubUser.id == row.user_id))
+    if row.template != TEMPLATE or row.account_id is None:
+        return None
+    try:
+        warning = WarningParams.parse(row.params)
+    except InvalidParamsError:
+        return None
+    if (
+        warning.repository_id is None
+        or runner_name(warning.provider, warning.runner_class) is None
+    ):
+        return None
+    found = session.execute(
+        select(Repository.name, Installation.id, Account.login)
+        .join(Installation, Installation.id == Repository.installation_id)
+        .join(Account, Account.id == Installation.account_id)
+        .where(Repository.id == warning.repository_id, Account.id == row.account_id)
+    ).first()
+    login = session.scalar(select(GithubUser.login).where(GithubUser.id == row.user_id))
     if found is None or login is None:
         return None
     name, installation_id, account = found
-    return RepositoryQuestion(installation_id, account, name, login)
+    return RepositoryQuestion(
+        warning.repository_id, row.account_id, row.user_id, installation_id, account, name, login
+    )
 
 
-def ask(github: GithubApp | None, row_id: uuid.UUID, question: RepositoryQuestion) -> str | None:
-    """Return the repository's name if GitHub says the recipient can see it now, else None.
+def ask(
+    github: GithubApp | None, row_id: uuid.UUID, question: RepositoryQuestion
+) -> RepositoryAnswer:
+    """Ask GitHub whether the recipient can see the repository now.
 
     Call it with no transaction open: it waits on the network. A failure logs one WARNING with
     the outbox ID and an outcome code only.
@@ -213,24 +232,15 @@ def ask(github: GithubApp | None, row_id: uuid.UUID, question: RepositoryQuestio
                 question.installation_id, question.account, question.repository, question.login
             )
         # Any failure leaves the name out and the email goes: GitHub's answers, the network, and
-        # an error of the client's own (a closed client, a URL it refuses, a token it cannot read).
-        except (
-            GithubAnswerError,
-            httpx2.HTTPError,
-            httpx2.InvalidURL,
-            OSError,
-            RuntimeError,
-            LookupError,
-            TypeError,
-            ValueError,
-        ) as err:
+        # an error of the client's own (a closed client, a URL it refuses, a token it cannot sign).
+        except Exception as err:  # noqa: BLE001  # logged as a code only: its text may name it
             code = _failure(err)
         else:
             if permission in SEEING:
-                return question.repository
+                return RepositoryAnswer(question, question.repository)
             code = "permission:none" if permission == "none" else "permission:other"
     logger.warning("email: %s: the repository is not named (%s)", row_id, code)
-    return None
+    return RepositoryAnswer(question, None)
 
 
 def _failure(err: Exception) -> str:

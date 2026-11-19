@@ -82,6 +82,8 @@ of its own.
   `tests/billing/test_forecast.py::test_the_pace_reaches_back_past_the_cycle_start`,
   `tests/billing/test_forecast.py::test_no_pace_counts_days_before_complete_from`,
   `tests/billing/test_usage.py::test_the_page_and_the_email_share_the_forecast_rule`).
+- The run-out day is the first day the forecast use reaches the allowance, today included, as ran-out counts reaching
+  it (`tests/billing/test_forecast.py::test_the_run_out_day_is_the_first_day_use_reaches_the_allowance`).
 - The data is complete from the day after the installation, from the earlier cycle start once every repository is
   backfilled, and never before the day after Delete my data
   (`tests/billing/test_usage.py::test_complete_from_is_the_day_after_the_install_until_every_repository_is_backfilled`,

@@ -586,3 +586,74 @@ def test_an_answer_error_carries_its_status(app: GithubApp, github: FakeGithub) 
     with pytest.raises(GithubAnswerError) as raised:
         get_all(app)
     assert raised.value.status == 404
+
+
+# ---------- the repository permission check ----------
+
+ACCOUNT, REPOSITORY, LOGIN = "example-org", "example-repo", "example-user"
+PERMISSION = f"GET /repos/{ACCOUNT}/{REPOSITORY}/collaborators/{LOGIN}/permission"
+
+
+def check(app: GithubApp) -> str:
+    return app.collaborator_permission(INSTALLATION, ACCOUNT, REPOSITORY, LOGIN)
+
+
+@pytest.mark.parametrize("permission", ["admin", "write", "read", "none"])
+def test_the_check_answers_github_s_permission_with_the_installation_token(
+    app: GithubApp, github: FakeGithub, permission: str
+) -> None:
+    github.queue(PERMISSION, httpx2.Response(200, json={"permission": permission}))
+    assert check(app) == permission
+    [request] = github.calls(PERMISSION)
+    assert bearer(request) == github.tokens[0]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx2.Response(301, headers={"location": f"{API}/repositories/1/collaborators/x"}),
+        httpx2.Response(404),
+        httpx2.Response(200, json={"role_name": "admin"}),
+        httpx2.Response(200, json={"permission": 1}),
+        httpx2.Response(200, text="not json"),
+    ],
+    ids=["moved", "not-found", "no-permission", "not-text", "not-json"],
+)
+def test_the_check_follows_no_redirect_and_names_no_value_when_it_fails(
+    app: GithubApp, github: FakeGithub, answer: httpx2.Response
+) -> None:
+    github.queue(PERMISSION, answer)
+    with pytest.raises(GithubAnswerError) as error:
+        check(app)
+    # Every request: a followed redirect would be a second GET, to another path.
+    assert [r.method for r in github.requests] == ["POST", "GET"]
+    assert not {ACCOUNT, REPOSITORY, LOGIN} & set(str(error.value).replace("/", " ").split())
+
+
+def test_a_name_that_is_not_one_path_segment_is_refused_unsent(
+    app: GithubApp, github: FakeGithub
+) -> None:
+    for account, repository, login in (("..", "x", "y"), ("x", "a/b", "y"), ("x", "y", "")):
+        with pytest.raises(GithubAnswerError):
+            app.collaborator_permission(INSTALLATION, account, repository, login)
+    assert github.requests == []
+
+
+def test_a_name_is_quoted_into_its_one_segment(app: GithubApp, github: FakeGithub) -> None:
+    github.queue(
+        # The fake matches on the decoded path; the raw one is checked below.
+        "GET /repos/example-org/a?b#c/collaborators/example-user/permission",
+        httpx2.Response(200, json={"permission": "read"}),
+    )
+    assert app.collaborator_permission(INSTALLATION, ACCOUNT, "a?b#c", LOGIN) == "read"
+    assert github.requests[-1].url.raw_path.startswith(b"/repos/example-org/a%3Fb%23c/")
+
+
+def test_a_paused_installation_fails_the_check_at_once(app: GithubApp, github: FakeGithub) -> None:
+    github.queue(PERMISSION, httpx2.Response(429, headers={"retry-after": "60"}))
+    with pytest.raises(RateLimitedError):
+        check(app)
+    sent = len(github.requests)
+    with pytest.raises(RateLimitedError):
+        check(app)
+    assert len(github.requests) == sent

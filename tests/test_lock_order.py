@@ -22,6 +22,7 @@ import httpx2
 import pytest
 from joserfc.jwk import RSAKey
 from sqlalchemy import Connection, Engine, delete, event, insert, select, text, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird import retention
@@ -1590,3 +1591,76 @@ def test_a_complaint_and_the_switch_turned_on(engine: Engine, cleanup: list[int]
     with Session(engine) as check:
         assert check.get_one(EmailPreference, (user_id, "usage_warnings")).enabled is True
         assert check.get_one(UserEmail, user_id).suppressed_at is None
+
+
+def test_the_repository_check_holds_no_lock(
+    engine: Engine, cleanup: list[int], sending: tuple[Mail, list[str]], rsa_key: RSAKey
+) -> None:
+    # The check is a network call. On each of its requests (the token's POST and the GET), no
+    # session is idle in a transaction, another connection takes every table the send and the
+    # question read at once, and it locks the email-send task row and the outbox row: the send
+    # holds nothing while GitHub answers.
+    mail, _ = sending
+    user_id = 8190
+    cleanup.append(user_id)
+    row_id = _recipient(engine, user_id)
+    params = example_params(NOW) | {
+        "repository_id": user_id * 10,
+        "runner_class": "linux-x64-2vcpu",
+    }
+    with engine.begin() as connection:
+        connection.execute(
+            update(EmailOutbox).where(EmailOutbox.id == row_id).values(params=params)
+        )
+        connection.execute(insert(WorkerTask).values(name=outbox.TASK, next_run_at=NOW))
+    probes: list[str] = []
+
+    def probe() -> str:
+        try:
+            with engine.connect() as connection, connection.begin() as transaction:
+                idle = connection.scalar(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+                        " AND state LIKE 'idle in transaction%' AND pid <> pg_backend_pid()"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "LOCK TABLE email_outbox, worker_task, repository, installation, account,"
+                        " github_user, user_email, email_preference, job"
+                        " IN ACCESS EXCLUSIVE MODE NOWAIT"
+                    )
+                )
+                for statement, key in (
+                    ("SELECT 1 FROM worker_task WHERE name = :key FOR UPDATE NOWAIT", outbox.TASK),
+                    ("SELECT 1 FROM email_outbox WHERE id = :key FOR UPDATE NOWAIT", row_id),
+                ):
+                    connection.execute(text(statement), {"key": key}).all()
+                transaction.rollback()
+        except OperationalError:
+            return "locked"
+        return "free" if idle == 0 else "in a transaction"
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        probes.append(probe())
+        if request.method == "POST":
+            expires = (NOW + timedelta(hours=1)).isoformat()
+            return httpx2.Response(
+                201, json={"token": secrets.token_hex(20), "expires_at": expires}
+            )
+        return httpx2.Response(200, json={"permission": "admin"})
+
+    app = GithubApp(
+        "Iv23.example",
+        rsa_key,
+        transport=httpx2.MockTransport(handle),
+        clock=lambda: NOW,
+        sleep=lambda _: None,
+    )
+    sender = mail.sender
+    assert isinstance(sender, RecordingSender)
+    outbox.run(sessionmaker(bind=engine), replace(mail, github=app), NOW)
+    app.close()
+    assert probes == ["free", "free"]
+    [message] = sender.sent
+    assert "in app" in message.text

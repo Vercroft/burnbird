@@ -16,6 +16,7 @@ https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-githu
 
 import re
 import time
+import urllib.parse
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -248,6 +249,35 @@ class GithubApp:
             )
         return response
 
+    def collaborator_permission(
+        self, installation: int, account: str, repository: str, login: str
+    ) -> str:
+        """Return GitHub's permission for a user on a repository: admin, write, read or none.
+
+        ``GET /repos/{account}/{repo}/collaborators/{username}/permission`` with the installation's
+        token, which the Metadata read permission allows; it is the user's highest role "after
+        considering all sources of grants"
+        (https://docs.github.com/en/rest/collaborators/collaborators). Made as every GET is
+        (``_get``): a paused scope fails at once, and a network or server error is retried a
+        bounded number of times. A redirect (a renamed repository) is not followed. Each name must
+        be one path segment and is quoted. No name reaches an exception: neither the account, the
+        repository nor the login.
+        """
+        call = "GET /repos/{account}/{repo}/collaborators/{username}/permission"
+        names = (account, repository, login)
+        if any(name in ("", ".", "..") or "/" in name for name in names):
+            raise GithubAnswerError(f"{call}: a name is not one path segment")
+        quoted = [urllib.parse.quote(name, safe="") for name in names]
+        path = f"/repos/{quoted[0]}/{quoted[1]}/collaborators/{quoted[2]}/permission"
+        response = self._get(path, call, installation)
+        try:
+            permission = response.json()["permission"]
+        except ValueError, KeyError, TypeError:
+            raise GithubAnswerError(f"{call} answered without a permission") from None
+        if not isinstance(permission, str):
+            raise GithubAnswerError(f"{call} answered without a permission")
+        return permission
+
     def now(self) -> datetime:
         """Return the client's time of day, the clock its rate limits are measured by."""
         return self._clock()
@@ -309,7 +339,11 @@ class GithubApp:
         self._pace(method)
         try:
             response = self._http.request(
-                method, url, headers={"Authorization": f"Bearer {authorization}"}, json=body
+                method,
+                url,
+                headers={"Authorization": f"Bearer {authorization}"},
+                json=body,
+                follow_redirects=False,
             )
         except httpx2.TransportError as err:
             if method == "GET":

@@ -13,14 +13,17 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+import httpx2
 import pytest
+from joserfc.jwk import RSAKey
 from sqlalchemy import Connection, delete, event, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from burnbird import retention
+from burnbird import logs, retention
 from burnbird.email import outbox
 from burnbird.email.outbox import Mail
 from burnbird.email.sender import Result
+from burnbird.github.client import GithubApp
 from burnbird.models import (
     Account,
     EmailOutbox,
@@ -565,6 +568,324 @@ def test_a_row_whose_params_are_not_a_run_out_warning_s_fails_once(
     row = _row(recipients, row_id)
     assert (row.state, row.outcome, row.finished_at) == ("failed", "params", NOW)
     assert sender.sent == []
+
+
+# ---------- the top repository, named only after a check outside the locks ----------
+
+REPOSITORY_NAME = "example-repo-name"
+LOGIN = f"example-{USER}"
+RUNNER = "Ubuntu x64 2 vCPU"
+type Answer = httpx2.Response | Exception
+
+
+@pytest.fixture
+def permission() -> list[Answer]:
+    """GitHub's answers to the permission check; the last one answers every retry."""
+    return []
+
+
+@pytest.fixture
+def github_requests() -> list[httpx2.Request]:
+    return []
+
+
+@pytest.fixture
+def checking_mail(
+    rsa_key: RSAKey,
+    sender: RecordingSender,
+    permission: list[Answer],
+    github_requests: list[httpx2.Request],
+) -> Iterator[Mail]:
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        github_requests.append(request)
+        first = permission[0] if permission else None
+        if request.method == "POST":
+            # 418 in the answers is the marker for a refused installation: its token is a 403.
+            if isinstance(first, httpx2.Response) and first.status_code == 418:
+                return httpx2.Response(403, json={"message": "suspended"})
+            expires = (NOW + timedelta(hours=1)).isoformat()
+            return httpx2.Response(
+                201, json={"token": "t" + uuid.uuid4().hex, "expires_at": expires}
+            )
+        answer = permission.pop(0) if len(permission) > 1 else first
+        if isinstance(answer, Exception):
+            raise answer
+        assert answer is not None
+        return answer
+
+    app = GithubApp(
+        "Iv23.example",
+        rsa_key,
+        transport=httpx2.MockTransport(handle),
+        clock=lambda: NOW,
+        sleep=lambda _: None,
+    )
+    yield Mail(sender=sender, origin=ORIGIN, environment=example_environment(), github=app)
+    app.close()
+
+
+def _top_queued(session: Session, user: int = USER) -> uuid.UUID:
+    repository_id = 9000 + user
+    session.execute(
+        update(Repository).where(Repository.id == repository_id).values(name=REPOSITORY_NAME)
+    )
+    return _queue(
+        session,
+        f"example:top:{user}",
+        user=user,
+        account=user,
+        params=_params(repository_id=repository_id, runner_class="linux-x64-2vcpu"),
+    )
+
+
+@pytest.mark.parametrize("answer", ["admin", "write", "read"])
+def test_read_write_and_admin_name_the_repository(
+    sessions: sessionmaker[Session],
+    recipients: Session,
+    checking_mail: Mail,
+    sender: RecordingSender,
+    permission: list[Answer],
+    github_requests: list[httpx2.Request],
+    answer: str,
+) -> None:
+    permission.append(httpx2.Response(200, json={"permission": answer}))
+    _top_queued(recipients)
+    outbox.run(sessions, checking_mail, NOW)
+    [message] = sender.sent
+    assert REPOSITORY_NAME in message.text
+    assert REPOSITORY_NAME in message.html
+    [check] = [r for r in github_requests if r.method == "GET"]
+    assert check.url.path == f"/repos/{LOGIN}/{REPOSITORY_NAME}/collaborators/{LOGIN}/permission"
+
+
+FAILED_CHECKS = [
+    pytest.param(httpx2.Response(200, json={"permission": "none"}), "permission:none", id="none"),
+    pytest.param(httpx2.Response(404), "http:404", id="404"),
+    pytest.param(httpx2.Response(403, json={"message": "Forbidden"}), "http:403", id="403"),
+    pytest.param(httpx2.Response(500), "http:500", id="500"),
+    pytest.param(httpx2.ReadTimeout("no answer"), "network", id="timeout"),
+    pytest.param(httpx2.Response(429, headers={"retry-after": "60"}), "rate_limited", id="rate"),
+    pytest.param(httpx2.Response(301), "http:301", id="moved"),
+    pytest.param(httpx2.Response(418), "refused", id="refused-installation"),
+]
+
+
+@pytest.mark.parametrize(("answer", "code"), FAILED_CHECKS)
+def test_none_404_403_500_a_timeout_and_a_rate_limit_leave_it_out(
+    sessions: sessionmaker[Session],
+    recipients: Session,
+    checking_mail: Mail,
+    sender: RecordingSender,
+    permission: list[Answer],
+    answer: Answer,
+    code: str,
+) -> None:
+    permission.append(answer)
+    _top_queued(recipients)
+    outbox.run(sessions, checking_mail, NOW)
+    [message] = sender.sent
+    assert REPOSITORY_NAME not in message.text
+    assert REPOSITORY_NAME not in message.html
+
+
+@pytest.mark.parametrize(("answer", "code"), FAILED_CHECKS)
+def test_the_email_is_sent_when_the_check_fails(
+    sessions: sessionmaker[Session],
+    recipients: Session,
+    checking_mail: Mail,
+    permission: list[Answer],
+    answer: Answer,
+    code: str,
+) -> None:
+    permission.append(answer)
+    row_id = _top_queued(recipients)
+    outbox.run(sessions, checking_mail, NOW)
+    assert _row(recipients, row_id).state == "sent"
+
+
+@pytest.mark.usefixtures("restore_logging")
+@pytest.mark.parametrize(("answer", "code"), FAILED_CHECKS)
+def test_a_failed_check_logs_one_warning_without_login_or_name(
+    sessions: sessionmaker[Session],
+    recipients: Session,
+    checking_mail: Mail,
+    permission: list[Answer],
+    caplog: pytest.LogCaptureFixture,
+    answer: Answer,
+    code: str,
+) -> None:
+    permission.append(answer)
+    row_id = _top_queued(recipients)
+    # The worker command's own logging set-up, at its most verbose, then every line captured.
+    logs.configure(logging.DEBUG)
+    logging.getLogger().addHandler(caplog.handler)
+    caplog.handler.setLevel(logging.DEBUG)
+    outbox.run(sessions, checking_mail, NOW)
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert [r.getMessage() for r in warnings] == [
+        f"email: {row_id}: the repository is not named ({code})"
+    ]
+    for record in caplog.records:
+        assert LOGIN not in record.getMessage()
+        assert REPOSITORY_NAME not in record.getMessage()
+
+
+@pytest.mark.usefixtures("restore_logging")
+def test_any_other_failure_of_the_check_leaves_the_name_out_and_sends(
+    sessions: sessionmaker[Session],
+    recipients: Session,
+    rsa_key: RSAKey,
+    sender: RecordingSender,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A client already closed raises an error of its own, not GitHub's.
+    app = GithubApp("Iv23.example", rsa_key, clock=lambda: NOW, sleep=lambda _: None)
+    app.close()
+    row_id = _top_queued(recipients)
+    logs.configure(logging.DEBUG)
+    logging.getLogger().addHandler(caplog.handler)
+    caplog.handler.setLevel(logging.DEBUG)
+    outbox.run(sessions, Mail(sender, ORIGIN, example_environment(), github=app), NOW)
+    assert _row(recipients, row_id).state == "sent"
+    assert REPOSITORY_NAME not in sender.sent[0].text
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings == [f"email: {row_id}: the repository is not named (error)"]
+
+
+@pytest.mark.usefixtures("restore_logging")
+def test_an_error_of_any_kind_leaves_the_name_out_and_sends(
+    sessions: sessionmaker[Session],
+    recipients: Session,
+    checking_mail: Mail,
+    sender: RecordingSender,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An error no list of types foresees, such as one from signing the App's JWT.
+    class UnforeseenError(Exception):
+        pass
+
+    def unforeseen(*args: object) -> str:
+        raise UnforeseenError(REPOSITORY_NAME)
+
+    assert checking_mail.github is not None
+    monkeypatch.setattr(checking_mail.github, "collaborator_permission", unforeseen)
+    row_id = _top_queued(recipients)
+    logs.configure(logging.DEBUG)
+    logging.getLogger().addHandler(caplog.handler)
+    caplog.handler.setLevel(logging.DEBUG)
+    outbox.run(sessions, checking_mail, NOW)
+    assert _row(recipients, row_id).state == "sent"
+    assert REPOSITORY_NAME not in sender.sent[0].text
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == [
+        f"email: {row_id}: the repository is not named (error)"
+    ]
+    assert REPOSITORY_NAME not in caplog.text
+
+
+def test_an_answer_names_only_the_repository_it_was_asked_about(
+    sessions: sessionmaker[Session],
+    recipients: Session,
+    checking_mail: Mail,
+    sender: RecordingSender,
+    permission: list[Answer],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The row's params change while GitHub answers: the answer is about the old repository.
+    from burnbird.email.run_out import ask
+
+    permission.append(httpx2.Response(200, json={"permission": "admin"}))
+    row_id = _top_queued(recipients)
+
+    def then_change(github: GithubApp | None, row: uuid.UUID, question: Any) -> object:
+        answer = ask(github, row, question)
+        changed = _params(repository_id=9000 + OTHER, runner_class="linux-x64-2vcpu")
+        recipients.execute(
+            update(EmailOutbox).where(EmailOutbox.id == row_id).values(params=changed)
+        )
+        return answer
+
+    monkeypatch.setattr("burnbird.email.run_out.ask", then_change)
+    outbox.run(sessions, checking_mail, NOW)
+    [message] = sender.sent
+    assert REPOSITORY_NAME not in message.text
+
+
+def test_github_is_asked_only_about_a_row_that_may_go(
+    sessions: sessionmaker[Session],
+    recipients: Session,
+    checking_mail: Mail,
+    github_requests: list[httpx2.Request],
+) -> None:
+    # One waits at the recipient cap; the other's user turned warnings off.
+    _sent_before(recipients, USER, outbox.RECIPIENT_CAP, NOW - timedelta(hours=1))
+    waiting = _top_queued(recipients)
+    off = _top_queued(recipients, OTHER)
+    recipients.get_one(EmailPreference, (OTHER, "usage_warnings")).enabled = False
+    recipients.flush()
+    outbox.run(sessions, checking_mail, NOW)
+    assert github_requests == []
+    assert (_row(recipients, waiting).state, _row(recipients, off).outcome) == ("queued", "off")
+
+
+def test_the_runner_type_is_always_named(
+    sessions: sessionmaker[Session],
+    recipients: Session,
+    checking_mail: Mail,
+    sender: RecordingSender,
+    permission: list[Answer],
+) -> None:
+    permission.extend([httpx2.Response(404), httpx2.Response(200, json={"permission": "admin"})])
+    _top_queued(recipients)
+    _top_queued(recipients, OTHER)
+    outbox.run(sessions, checking_mail, NOW)
+    assert len(sender.sent) == 2
+    assert all(RUNNER in message.text for message in sender.sent)
+    assert sum(REPOSITORY_NAME in message.text for message in sender.sent) == 1
+
+
+def test_no_repository_no_check_and_no_client_no_name(
+    sessions: sessionmaker[Session],
+    recipients: Session,
+    checking_mail: Mail,
+    mail: Mail,
+    sender: RecordingSender,
+    github_requests: list[httpx2.Request],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _queue(recipients, "example:no-top")
+    outbox.run(sessions, checking_mail, NOW)
+    assert github_requests == []
+    # A mail without a GitHub client never names the repository.
+    row_id = _top_queued(recipients)
+    with caplog.at_level(logging.WARNING):
+        outbox.run(sessions, mail, NOW)
+    assert REPOSITORY_NAME not in sender.sent[-1].text
+    assert [r.getMessage() for r in caplog.records] == [
+        f"email: {row_id}: the repository is not named (no_client)"
+    ]
+
+
+def test_a_row_that_will_not_go_is_not_checked(
+    sessions: sessionmaker[Session],
+    recipients: Session,
+    checking_mail: Mail,
+    github_requests: list[httpx2.Request],
+) -> None:
+    # A row whose params are not a warning's, or that names no runner size, asks GitHub nothing.
+    row_id = _top_queued(recipients)
+    recipients.execute(
+        update(EmailOutbox).where(EmailOutbox.id == row_id).values(params={"account": USER})
+    )
+    _queue(
+        recipients,
+        "example:no-runner",
+        user=OTHER,
+        account=OTHER,
+        params=_params(repository_id=9000 + OTHER),
+    )
+    outbox.run(sessions, checking_mail, NOW)
+    assert github_requests == []
 
 
 # ---------- the caps ----------

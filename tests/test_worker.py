@@ -16,6 +16,7 @@ from burnbird.github import backfill, events, reconcile, redeliver
 from burnbird.github.client import GithubApp
 from burnbird.models import (
     Account,
+    EmailPreference,
     GithubUser,
     Installation,
     Repository,
@@ -237,3 +238,65 @@ def test_a_pass_sends_the_queued_emails(
     run_once(sessions, github, NOW, mail=mail)
     assert isinstance(mail.sender, RecordingSender)
     assert len(mail.sender.sent) == 1
+
+
+def test_a_pass_gives_the_email_step_the_worker_s_github_client(
+    sessions: sessionmaker[Session], session: Session, rsa_key: RSAKey
+) -> None:
+    # The mail it is given has no client; the warning's repository is named only after the
+    # worker's own client asked GitHub.
+    session.add(GithubUser(id=7303, login="example-holder", last_sign_in_at=NOW))
+    session.add(Account(id=7303, login="example-holder", type="User", github_plan="GitHub Free"))
+    session.flush()
+    session.add(Installation(id=8303, account_id=7303, created_at=NOW))
+    session.flush()
+    session.add(Repository(id=9303, installation_id=8303, name="example-named", private=True))
+    session.flush()
+    session.add_all(
+        [
+            UserInstallation(user_id=7303, installation_id=8303),
+            UserEmail(user_id=7303, address="o" + "@" + "example.invalid", read_at=NOW),
+            EmailPreference(user_id=7303, kind="usage_warnings", enabled=True, updated_at=NOW),
+            example_usage(9303, 9303, NOW - timedelta(hours=1)),
+        ]
+    )
+    session.flush()
+    params = example_params(NOW) | {"repository_id": 9303, "runner_class": "linux-x64-2vcpu"}
+    outbox.enqueue(
+        session,
+        user_id=7303,
+        account_id=7303,
+        kind="usage_warnings",
+        template="run_out_warning",
+        dedupe_key="example:worker:named",
+        params=params,
+        now=NOW,
+        expires_at=NOW + timedelta(days=1),
+    )
+    session.flush()
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        if request.method == "POST" and request.url.path.endswith("/access_tokens"):
+            expires = (NOW + timedelta(hours=1)).isoformat()
+            return httpx2.Response(
+                201, json={"token": "t" + uuid.uuid4().hex, "expires_at": expires}
+            )
+        if request.url.path.endswith("/permission"):
+            return httpx2.Response(200, json={"permission": "admin"})
+        return httpx2.Response(200, json=[])
+
+    app = GithubApp(
+        "Iv23.example",
+        rsa_key,
+        transport=httpx2.MockTransport(handle),
+        clock=lambda: NOW,
+        sleep=lambda _: None,
+    )
+    sender = RecordingSender()
+    mail = Mail(
+        sender=sender, origin="https://burnbird.example.invalid", environment=example_environment()
+    )
+    run_once(sessions, app, NOW, mail=mail)
+    app.close()
+    [message] = sender.sent
+    assert "example-named" in message.text

@@ -11,17 +11,16 @@ run-out warnings on.
 
 **What.** For each provider and only the kinds its ``email_warnings`` lists, the warnings
 ``usage.allowance_state`` makes true now. A warning is keyed once per kind, account, provider,
-cycle and person (``outbox.run_out_warning_key``): one row per key, written with
-``ON CONFLICT DO NOTHING``. Of the kinds that may go (true now, and either with no row yet or with
-a row skipped for a reversible reason, ``REVERSIBLE``), only the most severe is queued, and only
-if no more severe row blocks it; nothing is recorded for the others. The order, most severe
-first, is ``SEVERITY``. A row blocks a less severe kind only while it is queued, sent or unknown
-(``BLOCKING``); a skipped one never does. A row skipped as ``superseded`` or ``disabled`` comes
-back, the same row put back to queued with today's top repository; every other skipped outcome
-is final for the cycle, and a sent or unknown row never comes back. A queued less severe row is
-finished as ``superseded`` when a more severe one is queued, so none is sent after it. A queued
-row expires at the cycle's reset, and names the cycle's top repository and runner size by ID
-only.
+cycle and person (``outbox.run_out_warning_key``): one row per key, written with ``ON CONFLICT DO
+NOTHING``. Of the kinds that may go (true now, and either with no row yet or with a row skipped for
+a reversible reason, ``REVERSIBLE``), only the most severe is queued, and only if no more severe
+row blocks it; nothing is recorded for the others. The order, most severe first, is ``SEVERITY``. A
+row blocks a less severe kind only while it is queued, sent or unknown (``BLOCKING``); a skipped
+one never does. A row skipped as ``superseded``, ``disabled`` or ``suspended`` comes back, the same
+row put back to queued with today's top repository; every other skipped outcome is final for the
+cycle, and a sent or unknown row never comes back. A queued less severe row is finished as
+``superseded`` when a more severe one is queued, so none is sent after it. A queued row expires at
+the cycle's reset, and names the cycle's top repository and runner size by ID only.
 
 **Locks.** One transaction per account, in this order: the ``email-warnings`` task row FOR UPDATE,
 so two runs queue one after the other; the account FOR KEY SHARE (level 2 of
@@ -66,9 +65,10 @@ logger = logging.getLogger(__name__)
 TASK: Final = "email-warnings"
 INTERVAL: Final = timedelta(hours=1)
 # A row skipped for one of these reasons comes back when its kind may go again: overtaken by a
-# more severe warning that was then not sent, or stopped by the switch. Every other skipped
-# outcome is final for the cycle, and a sent or unknown row never comes back.
-REVERSIBLE: Final = frozenset({"superseded", "disabled"})
+# more severe warning that was then not sent, stopped by the switch, or held while its
+# installation was suspended. Every other skipped outcome is final for the cycle, and a sent or
+# unknown row never comes back.
+REVERSIBLE: Final = frozenset({"superseded", "disabled", "suspended"})
 _REVERSIBLE: Final = frozenset(("skipped", outcome) for outcome in REVERSIBLE)
 
 

@@ -304,6 +304,22 @@ def test_a_disabled_warning_comes_back_when_the_switch_is_on_again(
     assert _rows(people) == {"used-75": ("queued", None)}
 
 
+def test_a_warning_skipped_while_suspended_comes_back_after(
+    people: Session, sessions: sessionmaker[Session]
+) -> None:
+    # Skipped at send while the installation was suspended. While it stays suspended, no run puts
+    # the row back; once it is active again and 80% still holds, the next run does.
+    _record(people, "used-75", "skipped", "suspended")
+    _use(people, PERSON, USED_75)
+    suspended = update(Installation).where(Installation.id == _installation(PERSON))
+    people.execute(suspended.values(suspended=True))
+    warnings.run(sessions, NOW)
+    assert _rows(people) == {"used-75": ("skipped", "suspended")}
+    people.execute(suspended.values(suspended=False))
+    warnings.run(sessions, NOW + timedelta(hours=1))
+    assert _rows(people) == {"used-75": ("queued", None)}
+
+
 def test_a_warning_put_back_names_the_current_top_repository(
     people: Session, sessions: sessionmaker[Session]
 ) -> None:

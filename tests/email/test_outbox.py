@@ -567,6 +567,20 @@ def test_a_skipped_more_severe_warning_does_not_stop_a_send(
     assert [message.reference for message in sender.sent] == [row_id]
 
 
+def test_a_warning_for_a_suspended_installation_is_skipped(
+    sessions: sessionmaker[Session], recipients: Session, mail: Mail, sender: RecordingSender
+) -> None:
+    # The account paused the App after the warning was queued: its numbers stop changing.
+    row_id = _queue(recipients, "example:suspended")
+    recipients.execute(
+        update(Installation).where(Installation.id == INSTALLATION[USER]).values(suspended=True)
+    )
+    outbox.run(sessions, mail, NOW)
+    row = _row(recipients, row_id)
+    assert (row.state, row.outcome, row.finished_at) == ("skipped", "suspended", NOW)
+    assert sender.sent == []
+
+
 def test_a_changed_cycle_is_skipped_as_expired(
     sessions: sessionmaker[Session], recipients: Session, mail: Mail, sender: RecordingSender
 ) -> None:

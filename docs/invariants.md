@@ -104,24 +104,27 @@ of its own.
   (`tests/email/test_outbox.py::test_a_second_enqueue_of_the_same_email_is_a_no_op`,
   `tests/test_lock_order.py::test_two_runs_at_once_queue_each_warning_once`,
   `tests/email/test_warnings.py::test_a_kind_recorded_once_is_never_queued_again_in_its_cycle`).
-- Of the kinds true now that may go (no row yet, or a row skipped as superseded or disabled), only the most severe is
-  queued, in the order ran-out, runs-out-before-reset, used-90, used-75, and nothing is recorded for the others; a
-  queued less severe row is superseded. A row blocks a less severe kind only while it is queued, sent or unknown; a
-  skipped one never does
-  (`tests/email/test_warnings.py::test_only_the_most_severe_new_warning_is_queued`,
+- Of the kinds true now that may go (no row yet, or a row skipped as superseded, disabled or suspended), only the most
+  severe is queued, in the order ran-out, runs-out-before-reset, used-90, used-75, and nothing is recorded for the
+  others; a queued less severe row is superseded. A row blocks a less severe kind only while it is queued, sent or
+  unknown; a skipped one never does (`tests/email/test_warnings.py::test_only_the_most_severe_new_warning_is_queued`,
   `tests/email/test_warnings.py::test_a_less_severe_warning_never_follows_a_more_severe_one`,
   `tests/email/test_warnings.py::test_a_skipped_more_severe_warning_does_not_block_a_less_severe_one`,
   `tests/email/test_warnings.py::test_a_less_severe_warning_follows_a_skipped_more_severe_one`,
   `tests/email/test_warnings.py::test_a_queued_less_severe_warning_is_superseded`,
   `tests/test_lock_order.py::test_two_runs_with_different_kinds_queue_one`).
-- A row skipped as superseded or disabled comes back, the same row put back to queued and naming the current top
-  repository and runner size, when its kind may go again; every other skipped outcome is final for the cycle, and a
+- A row skipped as superseded, disabled or suspended comes back, the same row put back to queued and naming the current
+  top repository and runner size, when its kind may go again; every other skipped outcome is final for the cycle, and a
   sent or unknown row never comes back
   (`tests/email/test_warnings.py::test_a_superseded_queued_warning_comes_back_when_the_more_severe_one_is_skipped`,
   `tests/email/test_warnings.py::test_a_disabled_warning_comes_back_when_the_switch_is_on_again`,
   `tests/email/test_warnings.py::test_a_final_skipped_warning_stays_final`,
   `tests/email/test_warnings.py::test_a_sent_or_unknown_warning_never_comes_back`,
   `tests/email/test_warnings.py::test_a_warning_put_back_names_the_current_top_repository`).
+- A run-out warning whose installation is suspended is skipped at send as `suspended`, and comes back once the
+  installation is active again and the warning still holds
+  (`tests/email/test_outbox.py::test_a_warning_for_a_suspended_installation_is_skipped`,
+  `tests/email/test_warnings.py::test_a_warning_skipped_while_suspended_comes_back_after`).
 - A warning goes only to a user who may see the account's whole use, with an address read within
   `retention.EMAIL_FRESHNESS`, not suppressed, and warnings on; only the kinds a provider's `email_warnings` lists
   (`tests/email/test_warnings.py::test_recipients_need_access`,

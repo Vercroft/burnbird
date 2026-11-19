@@ -5,6 +5,8 @@ was queued for, and the cycle's top repository and runner size, as IDs. At send,
 ``checked`` reads ``usage.allowance_state`` once: it is both the re-check and the source of every
 date and number the email gives.
 
+- A warning whose installation is suspended is ``suspended``: the account paused the App, so its
+  numbers stop changing. The queueing step puts it back once the installation is active again.
 - A row queued for another cycle than the state's (a new cycle, or a changed cycle day) is
   ``expired``.
 - A warning sent after a more severe one of the same allowance, cycle and person (queued, sent or
@@ -177,6 +179,10 @@ def checked(session: Session, row: EmailOutbox, now: datetime) -> Checked:
     warning = WarningParams.parse(row.params)
     if row.account_id is None:
         raise InvalidParamsError("a run-out warning names no account")
+    if session.scalar(
+        select(Installation.suspended).where(Installation.account_id == row.account_id)
+    ):
+        raise SkippedError("suspended")
     state = usage.allowance_state(session, row.account_id, warning.provider, now)
     if state is None:
         raise SkippedError("no_longer_true")

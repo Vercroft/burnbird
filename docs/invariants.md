@@ -99,6 +99,36 @@ of its own.
   (`tests/email/test_outbox.py::test_a_changed_cycle_is_skipped_as_expired`,
   `tests/email/test_outbox.py::test_a_run_out_forecast_no_longer_true_is_skipped`,
   `tests/email/test_outbox.py::test_a_percentage_warning_below_its_threshold_now_is_skipped`).
+- A run-out warning has one row per kind, account, provider, cycle and recipient while its record is kept (Delete my
+  data, a revoke and an uninstall delete it): the key is written once, with `ON CONFLICT DO NOTHING`
+  (`tests/email/test_outbox.py::test_a_second_enqueue_of_the_same_email_is_a_no_op`,
+  `tests/test_lock_order.py::test_two_runs_at_once_queue_each_warning_once`,
+  `tests/email/test_warnings.py::test_a_kind_recorded_once_is_never_queued_again_in_its_cycle`).
+- Of the kinds true now that may go (no row yet, or a row skipped as superseded or disabled), only the most severe is
+  queued, in the order ran-out, runs-out-before-reset, used-90, used-75, and nothing is recorded for the others; a
+  queued less severe row is superseded. A row blocks a less severe kind only while it is queued, sent or unknown; a
+  skipped one never does
+  (`tests/email/test_warnings.py::test_only_the_most_severe_new_warning_is_queued`,
+  `tests/email/test_warnings.py::test_a_less_severe_warning_never_follows_a_more_severe_one`,
+  `tests/email/test_warnings.py::test_a_skipped_more_severe_warning_does_not_block_a_less_severe_one`,
+  `tests/email/test_warnings.py::test_a_less_severe_warning_follows_a_skipped_more_severe_one`,
+  `tests/email/test_warnings.py::test_a_queued_less_severe_warning_is_superseded`,
+  `tests/test_lock_order.py::test_two_runs_with_different_kinds_queue_one`).
+- A row skipped as superseded or disabled comes back, the same row put back to queued and naming the current top
+  repository and runner size, when its kind may go again; every other skipped outcome is final for the cycle, and a
+  sent or unknown row never comes back
+  (`tests/email/test_warnings.py::test_a_superseded_queued_warning_comes_back_when_the_more_severe_one_is_skipped`,
+  `tests/email/test_warnings.py::test_a_disabled_warning_comes_back_when_the_switch_is_on_again`,
+  `tests/email/test_warnings.py::test_a_final_skipped_warning_stays_final`,
+  `tests/email/test_warnings.py::test_a_sent_or_unknown_warning_never_comes_back`,
+  `tests/email/test_warnings.py::test_a_warning_put_back_names_the_current_top_repository`).
+- A warning goes only to a user who may see the account's whole use, with an address read within
+  `retention.EMAIL_FRESHNESS`, not suppressed, and warnings on; only the kinds a provider's `email_warnings` lists
+  (`tests/email/test_warnings.py::test_recipients_need_access`,
+  `tests/email/test_warnings.py::test_a_stale_address_gets_none`,
+  `tests/email/test_warnings.py::test_a_suppressed_address_gets_none`,
+  `tests/email/test_warnings.py::test_warnings_off_get_none`,
+  `tests/email/test_warnings.py::test_github_queues_only_the_run_out_forecast`).
 - The state is read only after the caps, so a row that waits at a cap scans no jobs under the send's locks
   (`tests/email/test_outbox.py::test_a_row_waiting_at_a_cap_does_not_read_the_state`).
 - A run-out warning names its top repository only when GitHub says the recipient can read it; any other answer or
@@ -130,6 +160,15 @@ of its own.
 
 - Every path that locks more than one repository goes through `retention.lock_repositories`, in ID order
   (`tests/test_lock_order.py`).
+- The hourly queueing of run-out warnings locks its task row, the account FOR KEY SHARE, the recipients' user rows FOR
+  SHARE in ID order, then outbox rows; FOR SHARE makes Delete my data wait at the user row, and FOR KEY SHARE makes an
+  uninstall wait at the account, before either locks outbox rows
+  (`tests/test_lock_order.py::test_a_delete_my_data_during_a_run_does_not_deadlock`,
+  `tests/test_lock_order.py::test_an_uninstall_during_a_run_does_not_deadlock`).
+- A run never waits on a row being sent: a queued less severe row the sender holds is left alone, and if the sender
+  leaves it queued, its next send skips it as superseded, never after the more severe warning
+  (`tests/test_lock_order.py::test_a_run_does_not_wait_for_a_warning_being_sent`,
+  `tests/email/test_outbox.py::test_a_less_severe_warning_is_not_sent_after_a_more_severe_one`).
 - Every time limit on stored data is a purge in `retention.run_purges`, tested with a row just past it and one just
   inside it (`tests/test_retention.py`).
 - No job from before Delete my data is ever stored again
@@ -163,7 +202,7 @@ of its own.
   `burnbird_test_gw<number>` made for one pytest-xdist worker and dropped after it (`tests/test_database_guard.py`).
 
 - Run-out warnings run only with `BURNBIRD_RUN_OUT_WARNINGS=on`; unset is off and any other value stops the start. Off
-  also stops the warnings already queued: each is skipped as `disabled` instead of sent
+  also stops the warnings already queued: each is skipped as `disabled` instead of sent, and comes back once it is on
   (`tests/email/test_config.py::test_the_switch_is_off_unless_set_to_on`,
   `tests/email/test_config.py::test_an_invalid_switch_value_fails_at_start`,
   `tests/email/test_outbox.py::test_warnings_off_skips_a_queued_warning_as_disabled`,

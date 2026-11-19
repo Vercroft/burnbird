@@ -7,6 +7,9 @@ date and number the email gives.
 
 - A row queued for another cycle than the state's (a new cycle, or a changed cycle day) is
   ``expired``.
+- A warning sent after a more severe one of the same allowance, cycle and person (queued, sent or
+  unknown) is ``superseded``: the queueing step supersedes a queued less severe row, but leaves
+  one the sender holds alone, and the sender may leave it queued (a cap, a retry).
 - A warning the state no longer bears out is ``no_longer_true``: a percentage now under its
   threshold or a ran-out no longer used up (jobs deleted), a run-out the forecast no longer makes
   (jobs deleted, the plan or cycle day changed, a new day moved the pace).
@@ -56,6 +59,16 @@ logger = logging.getLogger(__name__)
 TEMPLATE: Final = "run_out_warning"
 _KEYS: Final = frozenset({"provider", "kind", "cycle_start", "repository_id", "runner_class"})
 _PERCENT: Final = {WarningKind.USED_75: 75, WarningKind.USED_90: 90}
+# The warnings of one allowance, cycle and person, most severe first: the queueing step and the
+# sender keep to one order.
+SEVERITY: Final = (
+    WarningKind.RAN_OUT,
+    WarningKind.RUNS_OUT_BEFORE_RESET,
+    WarningKind.USED_90,
+    WarningKind.USED_75,
+)
+# A warning in one of these states blocks a less severe one; a skipped one never does.
+BLOCKING: Final = frozenset({"queued", "sent", "unknown"})
 # The permissions that let a user see a repository: GitHub's answer is admin, write, read or none.
 SEEING: Final = frozenset({"admin", "write", "read"})
 # English month names, written out here so no locale setting can change them.
@@ -132,6 +145,16 @@ class WarningParams:
             provider.id, WarningKind(params["kind"]), cycle_start, repository_id, runner_class
         )
 
+    def to_params(self) -> dict[str, Any]:
+        """Return the params to queue: JSON values only, read back by ``parse``."""
+        return {
+            "provider": self.provider,
+            "kind": self.kind.value,
+            "cycle_start": self.cycle_start.isoformat(),
+            "repository_id": self.repository_id,
+            "runner_class": self.runner_class,
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class Checked:
@@ -159,6 +182,23 @@ def checked(session: Session, row: EmailOutbox, now: datetime) -> Checked:
         raise SkippedError("no_longer_true")
     if state.forecast.start != warning.cycle_start:
         raise SkippedError("expired")
+    # Never after a more severe warning of the same allowance, cycle and person that is out or
+    # still going: a run can leave this row queued while the sender holds it (a cap, a retry).
+    more = [kind.value for kind in SEVERITY[: SEVERITY.index(warning.kind)]]
+    if more and session.scalar(
+        select(EmailOutbox.id)
+        .where(
+            EmailOutbox.user_id == row.user_id,
+            EmailOutbox.account_id == row.account_id,
+            EmailOutbox.template == TEMPLATE,
+            EmailOutbox.state.in_(BLOCKING),
+            EmailOutbox.params["provider"].astext == warning.provider,
+            EmailOutbox.params["cycle_start"].astext == warning.cycle_start.isoformat(),
+            EmailOutbox.params["kind"].astext.in_(more),
+        )
+        .limit(1)
+    ):
+        raise SkippedError("superseded")
     if (percent := _PERCENT.get(warning.kind)) is not None:
         if state.forecast.used * 100 < state.allowance.amount * percent:
             raise SkippedError("no_longer_true")

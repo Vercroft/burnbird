@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from burnbird import retention
 from burnbird.account.service import save_warnings
 from burnbird.auth.service import ListedRepository, SignIn, session_digest, store_sign_in
-from burnbird.email import outbox, unsubscribe, webhook
+from burnbird.email import outbox, unsubscribe, warnings, webhook
 from burnbird.email.outbox import Mail
 from burnbird.email.preferences import set_choice
 from burnbird.github import backfill, reconcile, schemas
@@ -1667,3 +1667,204 @@ def test_the_repository_check_holds_no_lock(
     assert probes == ["free", "free"]
     [message] = sender.sent
     assert "in app" in message.text
+
+
+# ---------- the hourly queueing of run-out warnings ----------
+
+
+@pytest.fixture
+def warnings_task(engine: Engine) -> Iterator[None]:
+    """The email-warnings task row the runs lock, stored first, as a claimed run finds it.
+
+    Without it, the first run's insert of the row would make the second wait on its unique key,
+    hiding whether the runs' own lock keeps them in turn. Deleted after, like the email-send row.
+    """
+    with engine.begin() as connection:
+        connection.execute(insert(WorkerTask).values(name=warnings.TASK, next_run_at=NOW))
+    yield
+    with engine.begin() as connection:
+        connection.execute(delete(WorkerTask).where(WorkerTask.name == warnings.TASK))
+
+
+def _warned(engine: Engine, user_id: int) -> None:
+    """A person with their own account at 80% of its free Blacksmith minutes, warnings on."""
+    _recipient(engine, user_id)
+    with engine.begin() as connection:
+        # Not a run-out warning's key: the queueing step never reads it.
+        connection.execute(delete(EmailOutbox).where(EmailOutbox.user_id == user_id))
+
+
+def _queues(at: datetime, user_id: int) -> Path:
+    return lambda sessions: warnings.queue_account(sessions, user_id, at)
+
+
+def _states(engine: Engine, user_id: int) -> dict[str, str]:
+    with Session(engine) as check:
+        rows = check.scalars(select(EmailOutbox).where(EmailOutbox.user_id == user_id)).all()
+        return {row.params["kind"]: row.state for row in rows}
+
+
+@pytest.mark.usefixtures("warnings_task")
+def test_two_runs_at_once_queue_each_warning_once(engine: Engine, cleanup: list[int]) -> None:
+    # Both see used-75. The first is paused before it inserts; the second inserts the same key.
+    user_id = 8191
+    cleanup.append(user_id)
+    _warned(engine, user_id)
+
+    _race(engine, _queues(NOW, user_id), "INSERT INTO email_outbox", _queues(NOW, user_id))
+
+    assert _states(engine, user_id) == {"used-75": "queued"}
+
+
+@pytest.mark.usefixtures("warnings_task")
+def test_two_runs_with_different_kinds_queue_one(engine: Engine, cleanup: list[int]) -> None:
+    # The first run (16 November) sees 80%, used-75. The second (18 November) also counts 400 more
+    # on 17 November, 93%, used-90: another key, so only the task row's lock keeps them in turn.
+    # The first is paused before it inserts. In turn, the second queues used-90 and supersedes
+    # the first's used-75: one warning is queued, never both.
+    user_id = 8192
+    cleanup.append(user_id)
+    _warned(engine, user_id)
+    with sessionmaker(bind=engine).begin() as session:
+        session.add(example_usage(user_id * 10 + 1, user_id * 10, NOW + timedelta(days=1), 400))
+
+    _race(
+        engine,
+        _queues(NOW, user_id),
+        "INSERT INTO email_outbox",
+        _queues(NOW + timedelta(days=2), user_id),
+    )
+
+    assert _states(engine, user_id) == {"used-75": "skipped", "used-90": "queued"}
+
+
+@pytest.mark.usefixtures("warnings_task")
+def test_a_delete_my_data_during_a_run_does_not_deadlock(
+    engine: Engine, cleanup: list[int]
+) -> None:
+    # A used-75 warning is queued; 400 more today make it 93%, so the run supersedes it. The run is
+    # paused after it locked the account and the user, before it locks the queued row. Delete my
+    # data locks the user next and waits; it never holds the queued row while the run waits for it.
+    user_id = 8193
+    cleanup.append(user_id)
+    _warned(engine, user_id)
+    with sessionmaker(bind=engine).begin() as session:
+        session.add(
+            example_usage(user_id * 10 + 1, user_id * 10, NOW - timedelta(minutes=30), 400)
+        )
+        assert outbox.enqueue(
+            session,
+            user_id=user_id,
+            account_id=user_id,
+            kind="usage_warnings",
+            template="run_out_warning",
+            dedupe_key=outbox.run_out_warning_key(
+                "used-75", user_id, "blacksmith", NOW.date().replace(day=1), user_id
+            ),
+            params=example_params(NOW),
+            now=NOW,
+            expires_at=NOW + timedelta(days=1),
+        )
+
+    _race(
+        engine,
+        _queues(NOW, user_id),
+        lambda statement, _: (
+            statement.startswith("SELECT email_outbox.id") and "FOR UPDATE" in statement
+        ),
+        _delete_my_data(user_id),
+    )
+
+    with Session(engine) as check:
+        assert check.get(GithubUser, user_id) is None
+        assert check.scalars(select(EmailOutbox).where(EmailOutbox.user_id == user_id)).all() == []
+
+
+@pytest.mark.usefixtures("warnings_task")
+def test_an_uninstall_during_a_run_does_not_deadlock(engine: Engine, cleanup: list[int]) -> None:
+    # As above, with the account's uninstall: it locks the account FOR UPDATE, which the run's
+    # FOR KEY SHARE makes wait, before it deletes the account's outbox rows.
+    user_id = 8194
+    cleanup.append(user_id)
+    _warned(engine, user_id)
+    with sessionmaker(bind=engine).begin() as session:
+        session.add(
+            example_usage(user_id * 10 + 1, user_id * 10, NOW - timedelta(minutes=30), 400)
+        )
+        assert outbox.enqueue(
+            session,
+            user_id=user_id,
+            account_id=user_id,
+            kind="usage_warnings",
+            template="run_out_warning",
+            dedupe_key=outbox.run_out_warning_key(
+                "used-75", user_id, "blacksmith", NOW.date().replace(day=1), user_id
+            ),
+            params=example_params(NOW),
+            now=NOW,
+            expires_at=NOW + timedelta(days=1),
+        )
+
+    _race(
+        engine,
+        _queues(NOW, user_id),
+        lambda statement, _: (
+            statement.startswith("SELECT email_outbox.id") and "FOR UPDATE" in statement
+        ),
+        _transaction(lambda session: retention.uninstall(session, user_id - 3000)),
+    )
+
+    with Session(engine) as check:
+        assert check.get(Account, user_id) is None
+        assert (
+            check.scalars(select(EmailOutbox).where(EmailOutbox.account_id == user_id)).all() == []
+        )
+
+
+@pytest.mark.usefixtures("warnings_task")
+def test_a_run_does_not_wait_for_a_warning_being_sent(
+    engine: Engine, cleanup: list[int], sending: tuple[Mail, list[str]]
+) -> None:
+    # A used-75 warning is queued, and the sender holds it right now (another connection, FOR
+    # UPDATE). On 22 November, 2,900 of 3,000 are used and 100 a day forecasts a run-out today: the
+    # run queues it, leaves the row being sent alone, and finishes without waiting. If the sender
+    # then leaves that row queued (a cap, a retry), its next send skips it: never after runs-out.
+    user_id = 8195
+    cleanup.append(user_id)
+    _warned(engine, user_id)
+    today = NOW + timedelta(days=6)
+    with sessionmaker(bind=engine).begin() as session:
+        for n, day in enumerate(range(17, 22), start=1):
+            at = datetime(2026, 11, day, 12, tzinfo=UTC)
+            session.add(example_usage(user_id * 10 + n, user_id * 10, at, 100))
+        assert outbox.enqueue(
+            session,
+            user_id=user_id,
+            account_id=user_id,
+            kind="usage_warnings",
+            template="run_out_warning",
+            dedupe_key=outbox.run_out_warning_key(
+                "used-75", user_id, "blacksmith", NOW.date().replace(day=1), user_id
+            ),
+            params=example_params(NOW),
+            now=NOW,
+            expires_at=today + timedelta(days=1),
+        )
+    with engine.connect() as held, held.begin():
+        held.execute(
+            select(EmailOutbox.id).where(EmailOutbox.user_id == user_id).with_for_update()
+        ).all()
+        with engine.connect() as connection:
+            connection.exec_driver_sql("SET lock_timeout = '1s'")
+            connection.commit()
+            try:
+                warnings.queue_account(sessionmaker(bind=connection), user_id, today)
+            finally:
+                connection.rollback()
+                connection.exec_driver_sql("RESET lock_timeout")
+                connection.commit()
+
+    assert _states(engine, user_id) == {"used-75": "queued", "runs-out-before-reset": "queued"}
+    mail, _ = sending
+    outbox.run(sessionmaker(bind=engine), mail, today)
+    assert _states(engine, user_id) == {"used-75": "skipped", "runs-out-before-reset": "sent"}

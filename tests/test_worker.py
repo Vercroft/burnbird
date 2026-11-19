@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 import httpx2
 import pytest
 from joserfc.jwk import RSAKey
-from sqlalchemy import insert
+from sqlalchemy import func, insert, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird import purge, worker
@@ -16,6 +16,7 @@ from burnbird.github import backfill, events, reconcile, redeliver
 from burnbird.github.client import GithubApp
 from burnbird.models import (
     Account,
+    EmailOutbox,
     EmailPreference,
     GithubUser,
     Installation,
@@ -302,5 +303,75 @@ def test_a_pass_gives_the_email_step_the_worker_s_github_client(
     )
     run_once(sessions, app, NOW, mail=mail)
     app.close()
-    [message] = sender.sent
+    # The pass also queues and sends the person's own used-75 warning; this test's row is the
+    # one queued above.
+    row_id = session.scalar(
+        select(EmailOutbox.id).where(EmailOutbox.dedupe_key == "example:worker:named")
+    )
+    [message] = [m for m in sender.sent if m.reference == row_id]
     assert "example-named" in message.text
+
+
+def _warned_person(session: Session) -> None:
+    """A person with their own account, 80% of its free Blacksmith minutes used, warnings on."""
+    session.add(GithubUser(id=7304, login="example-warned", last_sign_in_at=NOW))
+    session.add(Account(id=7304, login="example-warned", type="User", github_plan="GitHub Free"))
+    session.flush()
+    session.add(Installation(id=8304, account_id=7304, created_at=NOW))
+    session.flush()
+    session.add(Repository(id=9304, installation_id=8304, name="app", private=True))
+    session.flush()
+    session.add_all(
+        [
+            UserInstallation(user_id=7304, installation_id=8304),
+            UserEmail(user_id=7304, address="w" + "@" + "example.invalid", read_at=NOW),
+            EmailPreference(user_id=7304, kind="usage_warnings", enabled=True, updated_at=NOW),
+            example_usage(9304, 9304, NOW - timedelta(hours=1)),
+        ]
+    )
+    session.flush()
+
+
+def _github_answering_nothing(rsa_key: RSAKey) -> GithubApp:
+    return GithubApp(
+        "Iv23.example",
+        rsa_key,
+        transport=httpx2.MockTransport(lambda _: httpx2.Response(200, json=[])),
+        clock=lambda: NOW,
+        sleep=lambda _: None,
+    )
+
+
+def test_warnings_off_enqueues_nothing(
+    sessions: sessionmaker[Session], session: Session, rsa_key: RSAKey
+) -> None:
+    _warned_person(session)
+    sender = RecordingSender()
+    # The switch's default: off.
+    mail = Mail(sender=sender, origin="https://burnbird.example.invalid")
+    app = _github_answering_nothing(rsa_key)
+    run_once(sessions, app, NOW, mail=mail)
+    app.close()
+    assert session.scalar(select(func.count()).select_from(EmailOutbox)) == 0
+    assert sender.sent == []
+
+
+def test_warnings_on_enqueues(
+    sessions: sessionmaker[Session], session: Session, rsa_key: RSAKey
+) -> None:
+    # On, one pass queues the warning, then sends it: the queueing step runs before the sending.
+    _warned_person(session)
+    sender = RecordingSender()
+    mail = Mail(
+        sender=sender,
+        origin="https://burnbird.example.invalid",
+        environment=example_environment(),
+        run_out_warnings=True,
+    )
+    app = _github_answering_nothing(rsa_key)
+    run_once(sessions, app, NOW, mail=mail)
+    app.close()
+    session.expire_all()
+    [row] = session.scalars(select(EmailOutbox)).all()
+    assert (row.params["kind"], row.state) == ("used-75", "sent")
+    assert len(sender.sent) == 1

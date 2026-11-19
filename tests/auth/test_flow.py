@@ -503,13 +503,11 @@ def test_no_token_verifier_or_code_reaches_a_log_or_a_row(
     written = capsys.readouterr().err
     assert "sign-in: user 7001" in caplog.text
     assert "sign-in: user 7001" in written
-    # The raw records hold none of them. The code is the exception: the test's own client logs
-    # the callback URL it requests, as a server's access log would, and the formatter removes it.
+    # The raw records hold none of them: the HTTP client, which logs each request's URL with the
+    # callback's code in it, logs only warnings (the formatter would remove the code too).
     for value in secrets_seen:
         assert value not in written
-        if value != code:
-            assert value not in caplog.text
-    assert code in caplog.text
+        assert value not in caplog.text
     session.flush()
     for table in Base.metadata.sorted_tables:
         for row in session.execute(select(table)):

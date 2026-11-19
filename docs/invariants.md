@@ -82,10 +82,25 @@ of its own.
   `tests/billing/test_forecast.py::test_the_pace_reaches_back_past_the_cycle_start`,
   `tests/billing/test_forecast.py::test_no_pace_counts_days_before_complete_from`,
   `tests/billing/test_usage.py::test_the_page_and_the_email_share_the_forecast_rule`).
+- The run-out day is the first day the forecast use reaches the allowance, today included, as ran-out counts reaching
+  it (`tests/billing/test_forecast.py::test_the_run_out_day_is_the_first_day_use_reaches_the_allowance`).
 - The data is complete from the day after the installation, from the earlier cycle start once every repository is
   backfilled, and never before the day after Delete my data
   (`tests/billing/test_usage.py::test_complete_from_is_the_day_after_the_install_until_every_repository_is_backfilled`,
   `tests/billing/test_usage.py::test_complete_from_is_never_before_the_day_after_the_data_was_deleted`).
+
+## Email
+
+- An email goes only to an address a sign-in read within `retention.EMAIL_FRESHNESS`: the send checks it, not only the
+  daily purge (`tests/email/test_outbox.py::test_an_address_past_its_freshness_is_not_mailed`).
+- A run-out warning is checked again at send against `usage.allowance_state`, the state its email's dates and numbers
+  come from: one queued for another cycle is skipped as `expired`, and one the state no longer bears out (a percentage
+  now under its threshold, a run-out no longer forecast, a ran-out no longer used up) as `no_longer_true`
+  (`tests/email/test_outbox.py::test_a_changed_cycle_is_skipped_as_expired`,
+  `tests/email/test_outbox.py::test_a_run_out_forecast_no_longer_true_is_skipped`,
+  `tests/email/test_outbox.py::test_a_percentage_warning_below_its_threshold_now_is_skipped`).
+- The state is read only after the caps, so a row that waits at a cap scans no jobs under the send's locks
+  (`tests/email/test_outbox.py::test_a_row_waiting_at_a_cap_does_not_read_the_state`).
 
 ## Stored data and deletion
 
@@ -112,6 +127,8 @@ of its own.
   `tests/account/test_you.py::test_turning_warnings_on_never_lifts_a_bounce`).
 - An email address never reaches a log line, an exception or a test's committed text
   (`tests/auth/test_email.py::test_the_address_never_reaches_a_log`, `tests/test_logs.py`).
+- No request URL reaches a log: a URL to GitHub names accounts, repositories and users, so the HTTP client logs only
+  warnings (`tests/test_logs.py::test_the_http_client_never_logs_a_request_line_even_at_debug`).
 
 ## Configuration
 

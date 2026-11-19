@@ -14,7 +14,7 @@ import calendar
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from enum import StrEnum
 from itertools import accumulate
 
@@ -181,9 +181,10 @@ def _utc_day(moment: datetime) -> date:
 
 
 def _runs_out(left: Decimal, pace: Decimal | None, today: date, reset: date) -> date | None:
-    # today + floor(left / pace) days, rounded down so a warning is never late. On or after the
-    # reset it lasts the cycle; checking that first keeps the day count small and needs no division
-    # by a zero pace.
-    if pace is None or left >= pace * (reset - today).days:
+    # The first day the use reaches the allowance, as ran-out counts it, with today at the pace
+    # too: the n-th day from today, where n = ceil(left / pace). On or after the reset it lasts the
+    # cycle; checking that first keeps the day count small and needs no division by a zero pace.
+    if pace is None or left > pace * (reset - today).days:
         return None
-    return today + timedelta(days=int(left // pace))
+    days = (left / pace).to_integral_value(rounding=ROUND_CEILING)
+    return today + timedelta(days=int(days) - 1)

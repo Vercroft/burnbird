@@ -149,19 +149,35 @@ def test_a_tiny_pace_lasts_the_cycle_without_overflowing() -> None:
 
 
 def test_a_run_out_on_the_reset_day_lasts_the_cycle() -> None:
-    # 700 left at 100 a day is 7 days from 2026-11-24: 2026-12-01, the reset.
+    # 701 left at 100 a day needs 8 days from 2026-11-24, counting it: 2026-12-01, the reset.
     daily = units({nov(d): 100 for d in range(17, 24)})
-    result = forecast(daily, Decimal(1400), 1, nov(24), complete_from=LONG_AGO)
-    assert (result.left, result.pace, result.runs_out) == (Decimal(700), Decimal(100), None)
+    result = forecast(daily, Decimal(1401), 1, nov(24), complete_from=LONG_AGO)
+    assert (result.left, result.pace, result.runs_out) == (Decimal(701), Decimal(100), None)
     assert result.warnings == ()
 
 
-def test_a_run_out_the_day_before_the_reset_warns() -> None:
-    # 699 left at 100 a day is 6.99 days, rounded down to 6: 2026-11-30.
-    daily = units({nov(d): 100 for d in range(17, 24)} | {nov(24): 1})
+@pytest.mark.parametrize("today_use", [0, 1])
+def test_a_run_out_the_day_before_the_reset_warns(today_use: int) -> None:
+    # 700 or 699 left at 100 a day is reached on the 7th day from 2026-11-24, counting it:
+    # 2026-11-30, the last day of the cycle.
+    daily = units({nov(d): 100 for d in range(17, 24)} | {nov(24): today_use})
     result = forecast(daily, Decimal(1400), 1, nov(24), complete_from=LONG_AGO)
     assert result.runs_out == nov(30)
     assert result.warnings == (runs_out(nov(30)),)
+
+
+def test_the_run_out_day_is_the_first_day_use_reaches_the_allowance() -> None:
+    # $8.40 of $12 used by 17 November, at $1.20 a day: today, 18 and 19 November each use
+    # $1.20, so the use reaches $12 on 19 November. Reaching the allowance is running out, as
+    # ran-out counts it (test_exactly_the_allowance_is_used_up).
+    daily = {nov(d): Decimal("1.20") for d in range(10, 17)}
+    result = forecast(daily, Decimal(12), 1, nov(17), complete_from=LONG_AGO)
+    assert (result.left, result.pace) == (Decimal("3.60"), Decimal("1.20"))
+    assert result.runs_out == nov(19)
+    assert result.warnings == (runs_out(nov(19)),)
+    # One cent more left is reached a day later.
+    more = forecast(daily, Decimal("12.01"), 1, nov(17), complete_from=LONG_AGO)
+    assert more.runs_out == nov(20)
 
 
 def test_a_run_out_within_a_day_is_today() -> None:
@@ -229,11 +245,11 @@ def test_the_real_case_of_2026_11_10() -> None:
     assert (result.start, result.reset) == (nov(1), date(2026, 12, 1))
     assert (result.used, result.left) == (Decimal(1588), Decimal(1412))
     # pace: 2026-11-03..09 without the busiest day (220 on 2026-11-06), 1,180 / 6 = 196.67 a day;
-    # 1,412 / 196.67 = 7.18, rounded down to 7 days.
+    # 1,412 / 196.67 = 7.18 days: reached on the 8th day from 2026-11-10, counting it.
     assert (result.pace, result.pace_days) == (Decimal(1180) / Decimal(6), 7)
     assert result.runs_out == nov(17)
-    # cycle pace: 1,520 over 2026-11-01..09 / 9 = 168.89 a day; 1,412 / 168.89 = 8.36, rounded
-    # down to 8.
+    # cycle pace: 1,520 over 2026-11-01..09 / 9 = 168.89 a day; 1,412 / 168.89 = 8.36 days:
+    # reached on the 9th day from 2026-11-10, counting it.
     assert result.cycle_pace == Decimal(1520) / Decimal(9)
     assert result.runs_out_by_cycle_pace == nov(18)
     # 52.9% used: no percentage warning. Blacksmith keeps running, so for it this is the day
@@ -284,9 +300,9 @@ def test_a_fresh_install_needs_four_full_days() -> None:
     three = forecast(daily, Decimal(100), 1, nov(13), complete_from=nov(10))
     assert (three.pace, three.pace_days, three.runs_out, three.warnings) == (None, 3, None, ())
     four = forecast(daily, Decimal(100), 1, nov(14), complete_from=nov(10))
-    # 50 left at 10 a day: 5 days, 19 November.
+    # 50 left at 10 a day is reached on the 5th day from 14 November, counting it: 18 November.
     assert (four.pace, four.pace_days) == (Decimal(10), 4)
-    assert four.warnings == (runs_out(nov(19)),)
+    assert four.warnings == (runs_out(nov(18)),)
 
 
 def test_no_pace_counts_days_before_complete_from() -> None:

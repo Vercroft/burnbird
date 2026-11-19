@@ -50,7 +50,13 @@ from burnbird.models import (
     WebhookDelivery,
     WorkerTask,
 )
-from tests.email.examples import RecordingSender, example_environment, webhook_event
+from tests.email.examples import (
+    RecordingSender,
+    example_environment,
+    example_params,
+    example_usage,
+    webhook_event,
+)
 from tests.github import fakes
 from tests.github.fakes import FakeGithub, installation_item, repository_item
 
@@ -1148,12 +1154,16 @@ def test_the_daily_purge_and_a_worker_processing_an_old_delivery(
 
 
 def _recipient(engine: Engine, user_id: int) -> uuid.UUID:
-    """A user with a personal installation, an address and warnings on, and one queued email."""
+    """A user with a personal installation, an address and warnings on, and one queued email.
+
+    The account has used 80% of its free Blacksmith minutes, so the queued used-75 warning is still
+    true at send.
+    """
     with engine.begin() as connection:
         connection.execute(
             insert(GithubUser).values(id=user_id, login=f"example-{user_id}", last_sign_in_at=NOW)
         )
-    _stored(engine, _installation(user_id - 3000, user_id, "User"))
+    _stored(engine, _installation(user_id - 3000, user_id, "User"), user_id * 10)
     with sessionmaker(bind=engine).begin() as session:
         session.add_all(
             [
@@ -1164,6 +1174,7 @@ def _recipient(engine: Engine, user_id: int) -> uuid.UUID:
                 EmailPreference(
                     user_id=user_id, kind="usage_warnings", enabled=True, updated_at=NOW
                 ),
+                example_usage(user_id * 10, user_id * 10, NOW - timedelta(hours=1)),
             ]
         )
         session.flush()
@@ -1174,7 +1185,7 @@ def _recipient(engine: Engine, user_id: int) -> uuid.UUID:
             kind="usage_warnings",
             template="run_out_warning",
             dedupe_key=f"example:race:{user_id}",
-            params={"account": user_id},
+            params=example_params(NOW),
             now=NOW,
             expires_at=NOW + timedelta(days=1),
         )

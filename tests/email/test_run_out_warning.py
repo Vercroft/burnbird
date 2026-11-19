@@ -447,3 +447,17 @@ def test_a_warning_with_no_wording_of_its_own_is_refused(provider: str, kind: st
 )
 def test_minutes_are_whole_with_a_thousands_separator(amount: str, words: str) -> None:
     assert run_out.whole(Decimal(amount)) == words
+
+
+def test_the_run_out_warning_key_names_the_warning_allowance_cycle_and_recipient() -> None:
+    key = run_out.run_out_warning_key("used_75", 123, "blacksmith", date(2026, 11, 1), 9)
+    assert key == "run_out_warning:used_75:123:blacksmith:2026-11-01:9"
+    others = {
+        run_out.run_out_warning_key("used_90", 123, "blacksmith", date(2026, 11, 1), 9),
+        run_out.run_out_warning_key("used_75", 124, "blacksmith", date(2026, 11, 1), 9),
+        run_out.run_out_warning_key("used_75", 123, "github", date(2026, 11, 1), 9),
+        run_out.run_out_warning_key("used_75", 123, "blacksmith", date(2026, 12, 1), 9),
+        run_out.run_out_warning_key("used_75", 123, "blacksmith", date(2026, 11, 1), 10),
+    }
+    assert key not in others
+    assert len(others) == 5

@@ -224,7 +224,11 @@ def lock_repositories(
     deliveries, which runs before its other purges.
 
     A path that sends an email holds its ``email-send`` task row and then the one outbox row, a
-    level 4 row, during the provider call, and nothing else of this order. Delete my data, a
+    level 4 row, during the provider call, and nothing else of this order. The hourly queueing of
+    run-out warnings (``email.warnings``) holds its ``email-warnings`` task row, then the account
+    FOR KEY SHARE (2), the recipients' user rows FOR SHARE in ID order (3), then outbox rows (4):
+    FOR SHARE so that Delete my data's FOR NO KEY UPDATE on the user waits for it before it locks
+    the user's outbox rows. Delete my data, a
     revoke and an uninstall delete outbox rows before the user's address and the account, so
     they wait for a send in progress, and nothing is sent after they commit.
 

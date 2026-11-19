@@ -1,7 +1,8 @@
 """The worker command's work: one pass over everything that is due.
 
 A pass takes the stored webhook deliveries first, then the periodic tasks that are due, then at
-most one repository's backfill, then the queued emails, then the daily purge when it is due. Each
+most one repository's backfill, then the hourly queueing of run-out warnings (only with the
+switch on), then the queued emails, then the daily purge when it is due. Each
 step is an isolation point: a failure is logged and the next step still runs, so one broken step
 never stops the others. The loop that repeats passes belongs to the worker command.
 """
@@ -15,7 +16,7 @@ from typing import Final
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird import purge
-from burnbird.email import outbox
+from burnbird.email import outbox, warnings
 from burnbird.email.outbox import Mail
 from burnbird.github import backfill, events, reconcile, redeliver
 from burnbird.github.client import GithubApp
@@ -38,6 +39,8 @@ def run_once(
     _step("backfill", lambda: backfill.run_next(sessions, github, now), False)
     # The outbox asks GitHub with the worker's own client, so a warning can name its repository.
     sending = replace(mail, github=github)
+    if mail.run_out_warnings:
+        _step("email-warnings", lambda: warnings.run(sessions, now), False)
     _step("email-send", lambda: outbox.run(sessions, sending, now), 0)
     _step("purge", lambda: purge.run(sessions, now), False)
     return taken

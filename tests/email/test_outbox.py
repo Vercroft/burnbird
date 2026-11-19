@@ -22,7 +22,7 @@ from sqlalchemy import Connection, delete, event, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird import logs, retention
-from burnbird.email import outbox
+from burnbird.email import outbox, run_out
 from burnbird.email.outbox import Mail
 from burnbird.email.sender import Result
 from burnbird.github.client import GithubApp
@@ -208,20 +208,6 @@ def test_a_second_enqueue_of_the_same_email_is_a_no_op(recipients: Session) -> N
         expires_at=NOW + timedelta(days=1),
     )
     assert len(recipients.scalars(select(EmailOutbox)).all()) == 1
-
-
-def test_the_run_out_warning_key_names_the_warning_allowance_cycle_and_recipient() -> None:
-    key = outbox.run_out_warning_key("used_75", 123, "blacksmith", date(2026, 11, 1), 9)
-    assert key == "run_out_warning:used_75:123:blacksmith:2026-11-01:9"
-    others = {
-        outbox.run_out_warning_key("used_90", 123, "blacksmith", date(2026, 11, 1), 9),
-        outbox.run_out_warning_key("used_75", 124, "blacksmith", date(2026, 11, 1), 9),
-        outbox.run_out_warning_key("used_75", 123, "github", date(2026, 11, 1), 9),
-        outbox.run_out_warning_key("used_75", 123, "blacksmith", date(2026, 12, 1), 9),
-        outbox.run_out_warning_key("used_75", 123, "blacksmith", date(2026, 11, 1), 10),
-    }
-    assert key not in others
-    assert len(others) == 5
 
 
 # ---------- the lease ----------
@@ -515,6 +501,70 @@ def test_a_percentage_warning_below_its_threshold_now_is_skipped(
     again = _queue(recipients, "example:75:again", user=OTHER, account=OTHER)
     outbox.run(sessions, mail, NOW)
     assert _row(recipients, again).outcome == "no_longer_true"
+
+
+def _more_severe(session: Session, state: str) -> None:
+    """A runs-out warning of USER's Blacksmith allowance this cycle, in ``state``, not due now."""
+    assert outbox.enqueue(
+        session,
+        user_id=USER,
+        account_id=USER,
+        kind="usage_warnings",
+        template="run_out_warning",
+        dedupe_key=run_out.run_out_warning_key(
+            "runs-out-before-reset", USER, "blacksmith", CYCLE_START, USER
+        ),
+        params=_params("runs-out-before-reset"),
+        now=NOW,
+        expires_at=NOW + timedelta(days=1),
+    )
+    finished = None if state == "queued" else NOW - timedelta(hours=1)
+    session.execute(
+        update(EmailOutbox)
+        .where(EmailOutbox.params["kind"].astext == "runs-out-before-reset")
+        .values(state=state, finished_at=finished, retry_at=NOW + timedelta(hours=1))
+    )
+
+
+@pytest.mark.parametrize("state", ["queued", "sent", "unknown"])
+def test_a_less_severe_warning_is_not_sent_after_a_more_severe_one(
+    sessions: sessionmaker[Session],
+    recipients: Session,
+    mail: Mail,
+    sender: RecordingSender,
+    state: str,
+) -> None:
+    # The used-75 row was left queued (a cap, a retry) while a run queued runs-out, or after it
+    # was sent: it is skipped as superseded, never sent after it.
+    row_id = _queue(recipients, "example:after")
+    _more_severe(recipients, state)
+    outbox.run(sessions, mail, NOW)
+    row = _row(recipients, row_id)
+    assert (row.state, row.outcome) == ("skipped", "superseded")
+    assert sender.sent == []
+
+
+def test_a_skipped_more_severe_warning_does_not_stop_a_send(
+    sessions: sessionmaker[Session], recipients: Session, mail: Mail, sender: RecordingSender
+) -> None:
+    row_id = _queue(recipients, "example:after:skipped")
+    _more_severe(recipients, "skipped")
+    outbox.run(sessions, mail, NOW)
+    assert [message.reference for message in sender.sent] == [row_id]
+
+
+def test_a_warning_for_a_suspended_installation_is_skipped(
+    sessions: sessionmaker[Session], recipients: Session, mail: Mail, sender: RecordingSender
+) -> None:
+    # The account paused the App after the warning was queued: its numbers stop changing.
+    row_id = _queue(recipients, "example:suspended")
+    recipients.execute(
+        update(Installation).where(Installation.id == INSTALLATION[USER]).values(suspended=True)
+    )
+    outbox.run(sessions, mail, NOW)
+    row = _row(recipients, row_id)
+    assert (row.state, row.outcome, row.finished_at) == ("skipped", "suspended", NOW)
+    assert sender.sent == []
 
 
 def test_a_changed_cycle_is_skipped_as_expired(

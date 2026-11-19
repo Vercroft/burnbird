@@ -48,7 +48,9 @@ run-out warnings on again with the switch starts it again.
 
 ## Who else handles it
 
-- **GitHub** is where your sign-in and every job's data come from.
+- **GitHub** is where your sign-in and every job's data come from. Before a run-out warning names a repository,
+  Burnbird asks GitHub, with the App's own access, whether you can still see it. That question gives GitHub your
+  GitHub login and the repository's name. If GitHub does not say yes, the email leaves the repository out.
 - **Cloudflare** carries the website's traffic, and forwards messages sent to hello@burnbird.racingcrow.com to
   Vercroft's company inbox.
 - No one else receives your email address today. When email starts, the address and each message will go to Zoho

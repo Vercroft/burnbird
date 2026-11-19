@@ -40,6 +40,12 @@ def example_templates() -> tuple[Template, Template]:
     )
 
 
+# The top runner and repository, when the send names them.
+_TOP = (
+    "{% if runner %} on {{ runner }}{% endif %}{% if repository %} in {{ repository }}{% endif %}"
+)
+
+
 def example_environment() -> Environment:
     """The environment with an example ``run_out_warning`` email, for tests of the sending."""
     assert ENVIRONMENT.loader is not None
@@ -50,9 +56,11 @@ def example_environment() -> Environment:
                     {
                         "email/run_out_warning.subject.txt": "Example {{ kind }} warning",
                         "email/run_out_warning.txt": "{% extends 'email/layout.txt' %}"
-                        "{% block body %}Example {{ kind }} warning{% endblock %}",
+                        "{% block body %}Example {{ kind }} warning"
+                        f"{_TOP}{{% endblock %}}",
                         "email/run_out_warning.html": "{% extends 'email/layout.html' %}"
-                        "{% block body %}<p>Example {{ kind }} warning</p>{% endblock %}",
+                        "{% block body %}<p>Example {{ kind }} warning"
+                        f"{_TOP}</p>{{% endblock %}}",
                     }
                 ),
                 ENVIRONMENT.loader,

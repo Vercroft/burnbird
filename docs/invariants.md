@@ -101,6 +101,16 @@ of its own.
   `tests/email/test_outbox.py::test_a_percentage_warning_below_its_threshold_now_is_skipped`).
 - The state is read only after the caps, so a row that waits at a cap scans no jobs under the send's locks
   (`tests/email/test_outbox.py::test_a_row_waiting_at_a_cap_does_not_read_the_state`).
+- A run-out warning names its top repository only when GitHub says the recipient can read it; any other answer or
+  failure leaves the name out and the email still goes
+  (`tests/email/test_outbox.py::test_read_write_and_admin_name_the_repository`,
+  `tests/email/test_outbox.py::test_none_404_403_500_a_timeout_and_a_rate_limit_leave_it_out`,
+  `tests/email/test_outbox.py::test_the_email_is_sent_when_the_check_fails`).
+- No network call is made while the send holds a lock, except the email's own POST: the repository check is made
+  before the send transaction, with no transaction open
+  (`tests/test_lock_order.py::test_the_repository_check_holds_no_lock`).
+- A failed check logs the outbox ID and a code, never the login or the repository's name
+  (`tests/email/test_outbox.py::test_a_failed_check_logs_one_warning_without_login_or_name`).
 
 ## Stored data and deletion
 

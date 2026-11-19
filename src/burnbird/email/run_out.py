@@ -13,24 +13,45 @@ date and number the email gives.
 
 Params that are not a run-out warning's fail the row: a kind its provider does not list in
 ``email_warnings``, an unknown key, or a value of the wrong type.
+
+The runner size is always named. The top repository is named only for a recipient GitHub says can
+see it now. That question is a network call, so it is asked with no transaction open and no lock
+held: ``repository_question`` reads what it needs in a short transaction that locks nothing, and
+``ask`` calls GitHub after it ends. Only read, write or admin names the repository; any other
+answer or failure leaves it out, the email still goes, and one WARNING gives the outbox ID and an
+outcome code, never the login or the repository's name.
 """
 
+import logging
+import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Final
 
-from sqlalchemy.orm import Session
+import httpx2
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
 
 from burnbird.billing import usage
 from burnbird.billing.forecast import WarningKind
 from burnbird.billing.providers import load_table
 from burnbird.billing.usage import AllowanceState
-from burnbird.models import EmailOutbox
+from burnbird.github.client import (
+    GithubAnswerError,
+    GithubApp,
+    InstallationRefusedError,
+    RateLimitedError,
+)
+from burnbird.models import Account, EmailOutbox, GithubUser, Installation, Repository
+
+logger = logging.getLogger(__name__)
 
 TEMPLATE: Final = "run_out_warning"
 _KEYS: Final = frozenset({"provider", "kind", "cycle_start", "repository_id", "runner_class"})
 _PERCENT: Final = {WarningKind.USED_75: 75, WarningKind.USED_90: 90}
+# The permissions that let a user see a repository: GitHub's answer is admin, write, read or none.
+SEEING: Final = frozenset({"admin", "write", "read"})
 
 
 class SkippedError(Exception):
@@ -117,3 +138,110 @@ def checked(session: Session, row: EmailOutbox, now: datetime) -> Checked:
     if on is None:
         raise SkippedError("no_longer_true")
     return Checked(warning, state, on)
+
+
+def runner_name(provider: str, runner_class: str | None) -> str | None:
+    """Return the provider table's name of a runner size, such as "Ubuntu x64 2 vCPU"."""
+    return next(
+        (r.name for r in load_table().runners if (r.provider, r.id) == (provider, runner_class)),
+        None,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryQuestion:
+    """What ``ask`` asks GitHub: whether this login can see this repository of this account."""
+
+    installation_id: int
+    account: str = field(repr=False)
+    repository: str = field(repr=False)
+    login: str = field(repr=False)
+
+
+def repository_question(
+    sessions: sessionmaker[Session], row_id: uuid.UUID, leased_until: datetime
+) -> RepositoryQuestion | None:
+    """Read what the repository check asks, in a short transaction that locks nothing.
+
+    None when there is nothing to ask: the row is not this lease's queued run-out warning, its
+    params are not a warning's, it names no repository or no runner size the email could name it
+    with, or the repository is no longer stored under the account.
+    """
+    with sessions.begin() as session:
+        row = session.get(EmailOutbox, row_id)
+        if (
+            row is None
+            or row.template != TEMPLATE
+            or row.state != "queued"
+            or row.retry_at != leased_until
+            or row.account_id is None
+        ):
+            return None
+        try:
+            warning = WarningParams.parse(row.params)
+        except InvalidParamsError:
+            return None
+        if (
+            warning.repository_id is None
+            or runner_name(warning.provider, warning.runner_class) is None
+        ):
+            return None
+        found = session.execute(
+            select(Repository.name, Installation.id, Account.login)
+            .join(Installation, Installation.id == Repository.installation_id)
+            .join(Account, Account.id == Installation.account_id)
+            .where(Repository.id == warning.repository_id, Account.id == row.account_id)
+        ).first()
+        login = session.scalar(select(GithubUser.login).where(GithubUser.id == row.user_id))
+    if found is None or login is None:
+        return None
+    name, installation_id, account = found
+    return RepositoryQuestion(installation_id, account, name, login)
+
+
+def ask(github: GithubApp | None, row_id: uuid.UUID, question: RepositoryQuestion) -> str | None:
+    """Return the repository's name if GitHub says the recipient can see it now, else None.
+
+    Call it with no transaction open: it waits on the network. A failure logs one WARNING with
+    the outbox ID and an outcome code only.
+    """
+    if github is None:
+        code = "no_client"
+    else:
+        try:
+            permission = github.collaborator_permission(
+                question.installation_id, question.account, question.repository, question.login
+            )
+        # Any failure leaves the name out and the email goes: GitHub's answers, the network, and
+        # an error of the client's own (a closed client, a URL it refuses, a token it cannot read).
+        except (
+            GithubAnswerError,
+            httpx2.HTTPError,
+            httpx2.InvalidURL,
+            OSError,
+            RuntimeError,
+            LookupError,
+            TypeError,
+            ValueError,
+        ) as err:
+            code = _failure(err)
+        else:
+            if permission in SEEING:
+                return question.repository
+            code = "permission:none" if permission == "none" else "permission:other"
+    logger.warning("email: %s: the repository is not named (%s)", row_id, code)
+    return None
+
+
+def _failure(err: Exception) -> str:
+    match err:
+        case RateLimitedError():
+            return "rate_limited"
+        case InstallationRefusedError():
+            return "refused"
+        case GithubAnswerError(status=int() as status):
+            return f"http:{status}"
+        case GithubAnswerError():
+            return "network"
+        case _:
+            return "error"

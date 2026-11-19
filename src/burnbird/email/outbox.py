@@ -18,7 +18,8 @@ so an email exists only if that decision commits. A second decision for the same
    and only then a run-out warning's state (``burnbird.email.run_out``), so a row that waits at a
    cap reads no jobs. A row that fails a check is ``skipped`` with the reason; one at a cap waits,
    queued, for the window to free; one whose params are not a run-out warning's fails. Otherwise
-   it renders the email
+   it renders the email, naming a run-out warning's top repository only if GitHub said, before
+   the transaction began and with no lock held, that the recipient can see it
    and makes the one POST while the outbox row stays locked: Delete my data, a revoke or an
    uninstall, which delete outbox rows first, wait for it, and nothing is sent after they commit.
    The sender's timeouts bound that wait.
@@ -58,6 +59,7 @@ from burnbird.auth.dependencies import account_access
 from burnbird.email import run_out
 from burnbird.email.message import compose, unsubscribe_url
 from burnbird.email.sender import Result, Sender
+from burnbird.github.client import GithubApp
 from burnbird.models import EmailOutbox, EmailPreference, Installation, UserEmail, WorkerTask
 from burnbird.retention import EMAIL_FRESHNESS
 from burnbird.templates import ENVIRONMENT
@@ -88,11 +90,16 @@ _COUNTED: Final = ("sent", "unknown")
 
 @dataclass(frozen=True, slots=True)
 class Mail:
-    """What sending needs: the sender, the site's origin for links, and the templates."""
+    """What sending needs: the sender, the site's origin for links, the templates and GitHub.
+
+    ``github`` asks whether a recipient can see a run-out warning's top repository; without it
+    the repository is never named.
+    """
 
     sender: Sender
     origin: str
     environment: Environment = field(default=ENVIRONMENT)
+    github: GithubApp | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,7 +193,13 @@ def claim(sessions: sessionmaker[Session], now: datetime) -> Claimed | None:
 
 
 def send(sessions: sessionmaker[Session], mail: Mail, claimed: Claimed, now: datetime) -> None:
-    """Check the leased row, then send it once or say why not, in one transaction."""
+    """Check the leased row, then send it once or say why not, in one transaction.
+
+    A run-out warning's repository check is a network call, so it is made first, with no
+    transaction open: the send transaction holds its locks only for the database and the POST.
+    """
+    question = run_out.repository_question(sessions, claimed.id, claimed.leased_until)
+    repository = None if question is None else run_out.ask(mail.github, claimed.id, question)
     with sessions.begin() as session:
         task = _lock_task(session, now)
         row = session.scalars(
@@ -207,9 +220,10 @@ def send(sessions: sessionmaker[Session], mail: Mail, claimed: Claimed, now: dat
             _put_back(row, wait)
             _CAP_ERRORS.log(session)
             return
+        warning = None
         if row.template == run_out.TEMPLATE:
             try:
-                run_out.checked(session, row, now)
+                warning = run_out.checked(session, row, now)
             except run_out.SkippedError as skip:
                 _skip(row, skip.reason, now)
                 return
@@ -220,7 +234,7 @@ def send(sessions: sessionmaker[Session], mail: Mail, claimed: Claimed, now: dat
                 return
         token = secrets.token_urlsafe(32) if row.kind == "usage_warnings" else None
         try:
-            message = _render(mail, row, address, token, _context(row))
+            message = _render(mail, row, address, token, _context(row, warning, repository))
         except Exception:
             # A broken template stays broken: fail the email rather than try it every lease.
             logger.exception("email: %s could not be rendered, user %d", row.id, row.user_id)
@@ -318,9 +332,17 @@ def _skip(row: EmailOutbox, reason: str, now: datetime) -> None:
     logger.info("email: %s skipped (%s), user %d", row.id, reason, row.user_id)
 
 
-def _context(row: EmailOutbox) -> dict[str, Any]:
+def _context(
+    row: EmailOutbox, warning: run_out.Checked | None, repository: str | None
+) -> dict[str, Any]:
     """Return the values the email's templates use, read at send."""
-    return dict(row.params)
+    context = dict(row.params)
+    if warning is not None:
+        context["repository"] = repository
+        context["runner"] = run_out.runner_name(
+            warning.params.provider, warning.params.runner_class
+        )
+    return context
 
 
 def _render(

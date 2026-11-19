@@ -8,6 +8,7 @@ never stops the others. The loop that repeats passes belongs to the worker comma
 
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 from typing import Final
 
@@ -35,7 +36,9 @@ def run_once(
     _step("reconcile", lambda: reconcile.run(sessions, github, now), False)
     _step("redeliver", lambda: redeliver.run(sessions, github, now), False)
     _step("backfill", lambda: backfill.run_next(sessions, github, now), False)
-    _step("email-send", lambda: outbox.run(sessions, mail, now), 0)
+    # The outbox asks GitHub with the worker's own client, so a warning can name its repository.
+    sending = replace(mail, github=github)
+    _step("email-send", lambda: outbox.run(sessions, sending, now), 0)
     _step("purge", lambda: purge.run(sessions, now), False)
     return taken
 

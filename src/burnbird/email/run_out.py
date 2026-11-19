@@ -48,6 +48,7 @@ from burnbird.billing import usage
 from burnbird.billing.forecast import WarningKind
 from burnbird.billing.providers import BLACKSMITH, GITHUB, load_table
 from burnbird.billing.usage import AllowanceState
+from burnbird.email import outbox
 from burnbird.github.client import (
     GithubAnswerError,
     GithubApp,
@@ -190,18 +191,16 @@ def checked(session: Session, row: EmailOutbox, now: datetime) -> Checked:
         raise SkippedError("expired")
     # Never after a more severe warning of the same allowance, cycle and person that is out or
     # still going: a run can leave this row queued while the sender holds it (a cap, a retry).
-    more = [kind.value for kind in SEVERITY[: SEVERITY.index(warning.kind)]]
-    if more and session.scalar(
-        select(EmailOutbox.id)
-        .where(
-            EmailOutbox.user_id == row.user_id,
-            EmailOutbox.account_id == row.account_id,
-            EmailOutbox.template == TEMPLATE,
-            EmailOutbox.state.in_(BLOCKING),
-            EmailOutbox.params["provider"].astext == warning.provider,
-            EmailOutbox.params["cycle_start"].astext == warning.cycle_start.isoformat(),
-            EmailOutbox.params["kind"].astext.in_(more),
+    # Asked by its dedupe key, as the queueing step asks.
+    keys = [
+        outbox.run_out_warning_key(
+            kind.value, row.account_id, warning.provider, warning.cycle_start, row.user_id
         )
+        for kind in SEVERITY[: SEVERITY.index(warning.kind)]
+    ]
+    if keys and session.scalar(
+        select(EmailOutbox.id)
+        .where(EmailOutbox.dedupe_key.in_(keys), EmailOutbox.state.in_(BLOCKING))
         .limit(1)
     ):
         raise SkippedError("superseded")

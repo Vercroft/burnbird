@@ -112,6 +112,8 @@ of its own.
   `tests/account/test_you.py::test_turning_warnings_on_never_lifts_a_bounce`).
 - An email address never reaches a log line, an exception or a test's committed text
   (`tests/auth/test_email.py::test_the_address_never_reaches_a_log`, `tests/test_logs.py`).
+- No request URL reaches a log: a URL to GitHub names accounts, repositories and users, so the HTTP client logs only
+  warnings (`tests/test_logs.py::test_the_http_client_never_logs_a_request_line_even_at_debug`).
 
 ## Configuration
 

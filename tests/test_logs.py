@@ -115,6 +115,14 @@ def test_authlib_never_logs_below_info_even_at_debug() -> None:
 
 
 @pytest.mark.usefixtures("restore_logging")
+def test_the_http_client_never_logs_a_request_line_even_at_debug() -> None:
+    # httpx2 logs each request's URL at INFO; a URL names accounts, repositories and users.
+    configure(logging.DEBUG)
+    assert not logging.getLogger("httpx2").isEnabledFor(logging.INFO)
+    assert logging.getLogger("httpx2").isEnabledFor(logging.WARNING)
+
+
+@pytest.mark.usefixtures("restore_logging")
 def test_configure_sends_every_line_through_the_redacting_formatter(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

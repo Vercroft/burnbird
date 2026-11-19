@@ -141,7 +141,7 @@ def restore_logging() -> Iterator[None]:
     """Put the logging set-up back after a test that configures it as a command does."""
     root = logging.getLogger()
     handlers, level = root.handlers[:], root.level
-    floors = {name: logging.getLogger(name).level for name in ("authlib",)}
+    floors = {name: logging.getLogger(name).level for name in ("authlib", "httpx2")}
     yield
     root.handlers[:] = handlers
     root.setLevel(level)

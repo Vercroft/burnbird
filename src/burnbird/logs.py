@@ -35,8 +35,10 @@ _EMAIL: Final = re.compile(
     r"(?<![\w.%+'-])(\w)[\w.%+'-]{0,63}@((?:[\w-]{1,63}\.){1,8}[\w-]{2,63})"
 )
 _OWN_DOMAIN: Final = "burnbird.racingcrow.com"
-# Authlib logs the PKCE verifier at DEBUG, so its logger never goes below INFO.
-_QUIET: Final = {"authlib": logging.INFO}
+# Authlib logs the PKCE verifier at DEBUG, so its logger never goes below INFO. The HTTP client
+# logs each request's URL at INFO, and a URL to GitHub names accounts, repositories and users, so
+# it logs only warnings and errors.
+_QUIET: Final = {"authlib": logging.INFO, "httpx2": logging.WARNING}
 
 
 def redact(text: str) -> str:
